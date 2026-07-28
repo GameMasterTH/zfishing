@@ -1,0 +1,13 @@
+{
+  "name": "zfishing-lua-harness",
+  "private": true,
+  "type": "module",
+  "description": "Node + wasmoon runner for the plain-Lua spec tests (no native Lua interpreter is available on this machine).",
+  "scripts": {
+    "test:water": "node luarun.mjs tests/water_validation.test.lua",
+    "test:water-preservation": "node luarun.mjs tests/water_validation_preservation.test.lua"
+  },
+  "devDependencies": {
+    "wasmoon": "^1.16.0"
+  }
+}
