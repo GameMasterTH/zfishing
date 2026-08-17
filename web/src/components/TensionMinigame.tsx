@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { fetchNui } from '../hooks/useNui'
 import { t } from '../i18n'
 import { MinigameEngine } from '../engine/minigameEngine'
+import { renderWithKeycaps } from './Keycap'
 
 type Props = {
   behavior: 'steady_light' | 'steady_heavy' | 'run_stop' | 'erratic'
@@ -61,14 +62,18 @@ export default function TensionMinigame(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // อยู่ในโซนเขียวไหม — เป็น boolean ที่ derive จาก state ทำให้ class เปลี่ยนเฉพาะตอน
+  // ข้ามขอบเขต ไม่ใช่ทุก frame ส่วนตำแหน่ง (left/width) ยังเป็น inline style ล้วน ๆ
+  const inZone = state.tension >= state.greenLo && state.tension <= state.greenHi
+
   return (
     <div className={`hud-panel reel-panel${state.overTension ? ' hud-panel--danger danger' : ''}`}>
-      <div className="panel-title">{t('ui_reel_title')}</div>
+      <div className="panel-title">{renderWithKeycaps(t('ui_reel_title'))}</div>
 
       <div className="bar-label">{t('ui_reel_tension')}</div>
       <div className="bar-track tension-track">
         <div
-          className="green-zone"
+          className={`green-zone${inZone ? ' green-zone--hit' : ''}`}
           style={{ left: `${state.greenLo}%`, width: `${state.greenHi - state.greenLo}%` }}
         />
         <div

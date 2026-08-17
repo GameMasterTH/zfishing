@@ -219,12 +219,34 @@ html, body, #root {
 /* reel minigame */
 .reel-panel { position: relative; min-width: 20vw; }
 .tension-track { overflow: visible; }
+/* Tier A: ตำแหน่ง (left/width) ของ green zone มาจาก engine ทุก frame — transition
+   ด้านล่างระบุเฉพาะ background/box-shadow เท่านั้น ห้ามเปลี่ยนเป็น `all` เด็ดขาด
+   ไม่งั้นโซนเขียวจะไถลตามหลัง engine */
 .green-zone {
   position: absolute;
   top: 0; height: 100%;
   background: var(--accent-dim);
   border-left: 1px solid var(--accent);
   border-right: 1px solid var(--accent);
+  transition: background var(--dur-fast) linear, box-shadow var(--dur-fast) linear;
+}
+.green-zone--hit {
+  background: rgba(69, 184, 164, 0.32);
+  box-shadow: inset 0 0 10px rgba(69, 184, 164, 0.6);
+}
+
+/* over-tension: ขอบแดงเต้น ไม่ใช่ shake — สั่นแถบที่ต้องเล็งทำให้เล็งพลาด */
+.reel-panel.danger::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 3vh rgba(207, 95, 95, 0.45);
+  animation: dangerVignette 0.5s ease-in-out infinite;
+}
+@keyframes dangerVignette {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
 }
 .tension-marker {
   position: absolute;
