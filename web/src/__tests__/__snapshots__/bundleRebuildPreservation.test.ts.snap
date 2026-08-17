@@ -36,31 +36,3 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "shared/util.lua": "b539e2c2f2fe9bc8b01b8804aea53012cf88c9e7c24685d39d05d6f8386d7a52",
 }
 `;
-
-exports[`Preservation: web/src source untouched (Req 3.1) > Property 2: hash ของทุกไฟล์ source ใน web/src (ยกเว้น tests) ตรงกับ baseline 1`] = `
-{
-  "App.tsx": "a754a97ce305103442a419260505689b230d57ce6a5b8db095dcf43aaa2f4f51",
-  "admin/AdminPanel.tsx": "52d5c18284da311441d96e36892a8880c258fb99ee5b5aa90de0d41aa9473081",
-  "admin/EquipmentTab.tsx": "17ca5a65c0c77a6ef5631ed22aeb90337dc1e523beb020e26e05ff8ba92ea112",
-  "admin/FishTab.tsx": "a5e984332caac87fac4f84d99660aa891704a269a0cd6e9e6a764a33681fcd79",
-  "admin/SettingsTab.tsx": "eb6df4ab64d21b67bb71963f735ffd90db4ba90cf4ea870dafd49a241294815c",
-  "admin/ZonesTab.tsx": "cc33d91ba4649b758c0b07adf79638a281ad7c93bf4808b103d6a36f13dd6525",
-  "admin/admin.css": "b9b981633fbc80c782e303768a4df777c4c39d4df2e1a69846e8fc0e22c6d41e",
-  "admin/ui.tsx": "ed61369a8b33dd8e95af5c8411f9311971100d6ec946b7ce90e5c14c073a3f61",
-  "components/CastBar.tsx": "238cbd2ea43e9139354cfa41e00c2d51beb63c696355a0284f619a6ab3d132a9",
-  "components/CatchCard.tsx": "d0a9208b7957f727b74b1ddd11ca5a3d18c79f3056b86aae08c3f545db673fa3",
-  "components/FishingInfoCard.tsx": "b8d10f8d8ece058c19a4d90ff26424936c4050c35382e81b3007b8ea955640f9",
-  "components/PromptHud.tsx": "a8aacff7966158ccbc564e5315fb8d998f2b45fee18e2871f10952aa67f371aa",
-  "components/RigMenu.tsx": "32be79c4b1b7b4501d0ed23a096f9b9bde3076b4d6c347fa27ce377f9c3ec785",
-  "components/TensionMinigame.tsx": "dca670a648d4f66db18eb399d71b53143261e3a1ebf44727c8cc50e33d13a984",
-  "components/WaitingHud.tsx": "2f580bf8cdb9cd9b32edc42399b80238cbb16cc3f017a42dd91866e13d7fdcdc",
-  "engine/minigameEngine.ts": "4fe9b04ba8f7665b024a6bf9e22d9ed544fa50704c67265effab13f666838033",
-  "hooks/useNui.ts": "2e40f00c2061da43aba675f530203672c37e83c9c8a37cf6d290f20b55863f12",
-  "i18n.ts": "981d467e9d7d152615e763b2edff4da7616fbb67458bee01c006ba9956ecd8b3",
-  "main.tsx": "60aeb2099b53d19456d4d9d52f704735f5c26008f5cf71ff4e984684e4f2ad00",
-  "promptText.ts": "d5c42d1fc3dd7769f6677a7bc2eb8a19980268faaa1d11c21e8bcf4414d094b1",
-  "rigRows.ts": "6cdd36362bc66b92a67662701a373b875060e1da9fd2681b98c0f8b42a4e2714",
-  "rigText.ts": "f69f51ee349154b8ca13fcaeb8c1ac43e2afa1747713eac5f5adf594ae26f9d9",
-  "style.css": "4b49ff10c96b90cb1630c0ca2c1b7257d31119588e1095f6b17b4028f0089fda",
-}
-`;

@@ -149,28 +149,9 @@ describe('Preservation: สไตล์เมนู .rig-menu โปร่งใ
   })
 })
 
-// ─── 3.4: HUD อื่นใน bundle เดียวกันยังคงกฎ CSS เดิม ──────────────────────────
-describe('Preservation: HUD อื่นใน bundle เดียวกันไม่ถูกกระทบ (3.4)', () => {
-  it('Property 2: กฎ CSS ของ CastBar/panel, PromptHud, catch card, ปุ่ม ยังคงอยู่และคงค่าหลัก', () => {
-    // CastBar ใช้ .panel + .cast-fill
-    const panel = findRule('.panel')
-    expect(panel).not.toBeNull()
-    expect(panel!.style.cssText).toContain('var(--bg)') // ยังคงพื้นหลังทึบเดิมของ panel
-    const castFill = findRule('.cast-fill')
-    expect(castFill).not.toBeNull()
-
-    // Prompt_HUD
-    const prompt = findRule('.prompt-hud')
-    expect(prompt).not.toBeNull()
-    expect(prompt!.style.cssText).toContain('pointer-events')
-    const promptTitle = findRule('.prompt-title')
-    expect(promptTitle).not.toBeNull()
-
-    // catch card + ปุ่ม
-    const catchCard = findRule('.catch-card')
-    expect(catchCard).not.toBeNull()
-    const btn = findRule('.btn')
-    expect(btn).not.toBeNull()
-    expect(btn!.style.cssText).toContain('cursor')
-  })
-})
+// ─── 3.4 (RETIRED) ───────────────────────────────────────────────────────────
+// บล็อกนี้เคยยืนยันว่า .panel ยังมี var(--bg) และ .btn/.cast-fill/.prompt-*/.catch-*
+// ยังอยู่ครบ — premise คือ bugfix นั้นแตะแค่ .rig-menu*
+// spec 2026-08-18-zfishing-hud-redesign ลบ .panel กับ .btn ทิ้งโดยเจตนา
+// (opaque panel -> .hud-panel โปร่งใส, .btn -> .hud-btn) guard นี้จึงหมดอายุ
+// บล็อก .rig-menu โปร่งใส + text-shadow ด้านบนยังอยู่ — ยังจริงหลัง redesign

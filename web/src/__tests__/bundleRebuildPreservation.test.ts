@@ -101,29 +101,10 @@ function readDistCss(): string {
 }
 
 // ── baseline ของ HUD components อื่น (สังเกตจาก bundle ปัจจุบัน) ────────────────
-// selector เหล่านี้ไม่ได้ถูกแตะโดย spec ก่อนหน้า (แก้เฉพาะ .rig-menu*) จึงต้องคงเดิม
-// ทั้งก่อนและหลัง rebuild — declaration ต่อไปนี้ถอดตรงจาก web/dist/assets/index-*.css
+// เหลือเฉพาะ Admin panel ซึ่งอยู่นอกขอบเขตของ HUD redesign — entry ของ .panel/.bar-*/
+// .catch-*/.prompt-* ถูกลบเพราะ spec 2026-08-18-zfishing-hud-redesign เปลี่ยนกฎเหล่านั้น
+// โดยเจตนา (opaque .panel -> transparent .hud-panel)
 const OTHER_HUD_BASELINE: Record<string, string> = {
-  // Prompt_HUD
-  '.prompt-hud':
-    'position:fixed;left:50%;bottom:7vh;transform:translate(-50%);max-width:40vw;text-align:center;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:.6vh;animation:slideFromBottom .25s cubic-bezier(.16,1,.3,1)',
-  '.prompt-title': 'font-size:3vh;font-weight:700;color:var(--text)',
-  '.prompt-subtitle': 'font-size:1.8vh;color:var(--muted)',
-  // CastBar / bars / panel
-  '.panel':
-    'background:var(--bg);border:1px solid var(--border);border-left:2px solid var(--accent);box-shadow:var(--shadow);padding:1.4vh 1.2vw;color:var(--text);min-width:16vw;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)',
-  '.bar-track':
-    'position:relative;width:100%;height:1.6vh;background:#ffffff12;border:1px solid var(--border);overflow:hidden',
-  '.bar-fill': 'height:100%;transition:width 60ms linear',
-  '.cast-fill': 'background:var(--warn)',
-  '.energy-fill': 'background:var(--accent);transition:none',
-  '.bar-caption': 'font-size:1.4vh;text-align:right;margin-top:.4vh;color:var(--muted)',
-  // catch card
-  '.catch-card': 'text-align:center;pointer-events:auto',
-  '.catch-name': 'font-size:2.4vh;font-weight:700',
-  '.catch-weight': 'font-size:1.7vh;color:var(--muted);margin-top:.4vh',
-  '.catch-stars': 'font-size:2vh;color:var(--warn);margin:.8vh 0 1.2vh;letter-spacing:.2em',
-  '.catch-actions': 'display:flex;gap:.6vw;justify-content:center',
   // Admin panel
   '.admin-overlay':
     'position:fixed;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;background:#04080cb8;font-family:var(--font);color:var(--text)',
@@ -131,25 +112,12 @@ const OTHER_HUD_BASELINE: Record<string, string> = {
     'width:92vw;max-width:1040px;height:84vh;background:#0e141b;border:1px solid var(--border);box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden',
 }
 
-// ── 3.1: web/src/* source ไม่ถูกแก้ (source of truth) ─────────────────────────
-// NOTE: baseline snapshot ของ style.css ถูกอัปเดต (83d0c945… -> 585f9824…) เพราะ spec
-// `rig-menu-icon-oversize-fix` แก้ web/src/style.css โดยเจตนา (เพิ่มกฎ .rig-row__icon img
-// + overflow:hidden) — เป็นการแก้ที่ตั้งใจ ไม่ใช่ regression ต่อ spec นี้
-describe('Preservation: web/src source untouched (Req 3.1)', () => {
-  it('Property 2: hash ของทุกไฟล์ source ใน web/src (ยกเว้น tests) ตรงกับ baseline', () => {
-    const files = walkFiles(SRC, isTestPath)
-    // sanity: source of truth หลัก ๆ ต้องมีอยู่จริง
-    const rels = files.map((f) => relative(SRC, f).split(sep).join('/'))
-    expect(rels).toContain('style.css')
-    expect(rels).toContain('App.tsx')
-    expect(rels).toContain('components/RigMenu.tsx')
-    expect(rels).toContain('hooks/useNui.ts')
-
-    const tree = hashTree(SRC, files)
-    // snapshot: สร้าง baseline ครั้งแรก (task 2) แล้วเทียบซ้ำหลัง rebuild+deploy (task 3.5)
-    expect(tree).toMatchSnapshot()
-  })
-})
+// ── 3.1 (RETIRED) ────────────────────────────────────────────────────────────
+// บล็อกนี้เคย hash ทุกไฟล์ใน web/src เพื่อยืนยันว่า bugfix นั้นไม่แตะ source เลย
+// spec 2026-08-18-zfishing-hud-redesign แก้ style.css + components โดยเจตนา
+// premise ของ guard นี้จึงหมดอายุ — ลบทิ้ง ไม่ใช่ re-snapshot (re-snapshot จะได้ test
+// ที่ต้องอัปเดตทุกครั้งที่แก้ CSS แต่ไม่จับ bug จริง)
+// guard ที่ยังมีค่า (Lua hash, fxmanifest, admin, locales) ยังอยู่ด้านล่าง
 
 // ── 3.4: Lua + fxmanifest ไม่ถูกแก้ ───────────────────────────────────────────
 describe('Preservation: Lua source + fxmanifest untouched (Req 3.4)', () => {
