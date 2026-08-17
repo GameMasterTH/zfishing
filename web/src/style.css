@@ -172,26 +172,48 @@ html, body, #root {
   gap: 0.6vw;
   font-size: 1.6vh;
 }
-.waiting-dot {
-  width: 0.9vh; height: 0.9vh;
+.waiting-ripple {
+  position: relative;
+  flex-shrink: 0;
+  width: 1.1vh;
+  height: 1.1vh;
   background: var(--accent);
-  animation: pulse 1.2s ease-in-out infinite;
 }
-@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+.waiting-ripple::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--accent);
+  animation: ripple 1.8s ease-out infinite;
+}
+@keyframes ripple {
+  from { transform: scale(1);   opacity: 0.8; }
+  to   { transform: scale(2.8); opacity: 0; }
+}
 
-/* bite */
-.bite-panel { text-align: center; }
+/* bite
+   .bite-panel sets its own animation, overriding the panelIn it inherits from
+   .hud-panel. That works purely on source order — both are single-class
+   selectors, so specificity ties and the later rule wins. KEEP .bite-panel
+   below .hud-panel in this file, or the bite entrance silently reverts. */
+.bite-panel { text-align: center; animation: biteIn 180ms var(--ease-out); }
 .bite-text {
   font-size: 2.6vh;
   font-weight: 700;
   color: var(--warn);
-  animation: shake 0.35s linear infinite;
+  text-shadow: var(--hud-shadow-text), 0 0 12px rgba(217, 160, 63, 0.55);
+  animation: biteBeat 0.9s steps(1, end) infinite;
 }
 .bite-prompt { font-size: 1.6vh; margin-top: 0.6vh; color: var(--text); }
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-2px); }
-  75% { transform: translateX(2px); }
+@keyframes biteIn {
+  0%   { opacity: 0; transform: scale(0.9); }
+  60%  { opacity: 1; transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+/* same 0.9s period as .keycap--urgent, so text and chip pulse together */
+@keyframes biteBeat {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0.72; }
 }
 
 /* reel minigame */

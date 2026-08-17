@@ -55,7 +55,7 @@
   "ui_info_distance": "Distance",
   "ui_waiting": "Waiting for a bite…",
   "ui_bite": "Fish on!",
-  "ui_bite_prompt": "PRESS SPACE",
+  "ui_bite_prompt": "PRESS [SPACE]",
   "ui_reel_title": "Reel — hold SPACE",
   "ui_reel_tension": "Line tension",
   "ui_reel_energy": "Fish energy",

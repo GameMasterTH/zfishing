@@ -57,7 +57,7 @@
   "ui_info_distance": "ระยะ",
   "ui_waiting": "รอปลากินเบ็ด…",
   "ui_bite": "ปลากินเบ็ด!",
-  "ui_bite_prompt": "กด SPACE",
+  "ui_bite_prompt": "กด [SPACE]",
   "ui_reel_title": "ดึงปลา — กด SPACE ค้าง",
   "ui_reel_tension": "แรงตึงสาย",
   "ui_reel_energy": "พลังปลา",
