@@ -2,7 +2,7 @@ import { t } from '../i18n'
 
 export default function FishingInfoCard(props: { rod?: string; bait?: string; distance?: number }) {
   return (
-    <div className="panel info-card">
+    <div className="hud-panel info-card">
       <div className="panel-title">{t('ui_info_title')}</div>
       <div className="info-row"><span>{t('ui_info_rod')}</span><b>{props.rod ?? '-'}</b></div>
       <div className="info-row"><span>{t('ui_info_bait')}</span><b>{props.bait ?? '-'}</b></div>

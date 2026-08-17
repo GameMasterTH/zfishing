@@ -62,7 +62,7 @@ export default function TensionMinigame(props: Props) {
   }, [])
 
   return (
-    <div className={`panel reel-panel${state.overTension ? ' danger' : ''}`}>
+    <div className={`hud-panel reel-panel${state.overTension ? ' hud-panel--danger danger' : ''}`}>
       <div className="panel-title">{t('ui_reel_title')}</div>
 
       <div className="bar-label">{t('ui_reel_tension')}</div>

@@ -3,7 +3,7 @@ import { t } from '../i18n'
 export default function CastBar(props: { power: number; state?: string }) {
   const pct = Math.round(props.power * 100)
   return (
-    <div className="panel cast-panel">
+    <div className="hud-panel cast-panel">
       <div className="panel-title">{t('ui_cast_title')}</div>
       <div className="bar-track">
         <div className="bar-fill cast-fill" style={{ width: `${pct}%` }} />

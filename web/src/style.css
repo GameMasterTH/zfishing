@@ -48,17 +48,6 @@ html, body, #root {
 
 .hud-stack { display: flex; flex-direction: column; gap: 0.8vh; align-items: flex-end; }
 
-.panel {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  box-shadow: var(--shadow);
-  padding: 1.4vh 1.2vw;
-  color: var(--text);
-  min-width: 16vw;
-  backdrop-filter: blur(4px);
-}
-
 /* ---------------------------------------------------------------- Water HUD
    Transparent surface. The 2px left rail is the only chrome, and its colour
    carries state. No ground, no border box, no shadow, no blur — legibility
@@ -137,7 +126,7 @@ html, body, #root {
 @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 /* bite */
-.bite-panel { border-left-color: var(--warn); background: rgba(48, 38, 18, 0.93); text-align: center; }
+.bite-panel { text-align: center; }
 .bite-text {
   font-size: 2.6vh;
   font-weight: 700;
@@ -152,8 +141,7 @@ html, body, #root {
 }
 
 /* reel minigame */
-.reel-panel { min-width: 20vw; }
-.reel-panel.danger { border-color: var(--danger); border-left-color: var(--danger); }
+.reel-panel { position: relative; min-width: 20vw; }
 .tension-track { overflow: visible; }
 .green-zone {
   position: absolute;
@@ -182,20 +170,30 @@ html, body, #root {
 .catch-weight { font-size: 1.7vh; color: var(--muted); margin-top: 0.4vh; }
 .catch-stars { font-size: 2vh; color: var(--warn); margin: 0.8vh 0 1.2vh; letter-spacing: 0.2em; }
 .catch-actions { display: flex; gap: 0.6vw; justify-content: center; }
-.btn {
+/* buttons */
+.hud-btn {
   pointer-events: auto;
   padding: 0.9vh 1.6vw;
+  font-family: var(--font);
   font-size: 1.4vh;
   font-weight: 700;
-  font-family: var(--font);
   color: var(--text);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.15);
   cursor: pointer;
+  text-shadow: var(--hud-shadow-text);
+  transition: background var(--dur-fast) linear, transform var(--dur-fast) var(--ease-out);
 }
-.btn:hover { background: rgba(255, 255, 255, 0.14); }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #0c1015; }
-.btn-primary:hover { background: #55c7b3; }
+.hud-btn:hover  { background: rgba(255, 255, 255, 0.16); }
+.hud-btn:active { transform: scale(0.97); }
+
+.hud-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0c1015;
+  text-shadow: none;
+}
+.hud-btn--primary:hover { background: #55c7b3; }
 
 /* Prompt_HUD: กลางจอแนวนอน, ชิดล่าง 5–10% (R1.1), ไม่รับ pointer (R1.5) */
 .prompt-hud {
