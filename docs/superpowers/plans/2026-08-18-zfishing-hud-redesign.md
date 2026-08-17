@@ -412,7 +412,7 @@ none' is the override that makes the tier work."
 - Create: `web/src/components/__tests__/Keycap.test.tsx`
 - Modify: `web/src/components/PromptHud.tsx`
 - Modify: `web/src/style.css` (append keycap rules)
-- Modify: `locales/th.json`, `locales/en.json`
+- **No locale files** — see Step 6's note.
 
 **Interfaces:**
 - Consumes: `--hud-shadow-text`, `--font` from Task 2.
@@ -602,44 +602,30 @@ export default function PromptHud({ titleKey, subtitleKey }: Props) {
 
 `.prompt-title` and `.prompt-subtitle` both survive as elements in the same document order, so `PromptHud.test.tsx` stays green.
 
-- [ ] **Step 7: Bracket the two `ui_*` keys that lack brackets**
+**No locale edits in this task — this is deliberate and load-bearing.** `equip_hint` and `cancel_hint` already use the bracket convention, so PromptHud works the moment Step 6 lands. `ui_bite_prompt` and `ui_reel_title` do *not* have brackets yet, and they must stay that way until the components that render them call `renderWithKeycaps`. Bracketing them here would put a literal `[SPACE]` on the player's screen from Task 3 through Task 8, and no test would catch it. Those two edits ship inside Task 7 and Task 8, alongside the components that consume them.
 
-`equip_hint` and `cancel_hint` already use the bracket convention. These two do not.
+Also do **not** touch `equip_hint` or `rig_button_label` at any point — `bundleRebuildPreservation.test.ts` still asserts their exact contents.
 
-In `locales/th.json`:
-```json
-  "ui_bite_prompt": "กด [SPACE]",
-  "ui_reel_title": "ดึงปลา — กด [SPACE] ค้าง",
-```
-
-In `locales/en.json`:
-```json
-  "ui_bite_prompt": "PRESS [SPACE]",
-  "ui_reel_title": "Reel — hold [SPACE]",
-```
-
-Brackets are the only edit in all four values — the wording is unchanged from what is there now (`"กด SPACE"`, `"ดึงปลา — กด SPACE ค้าง"`, `"PRESS SPACE"`, `"Reel — hold SPACE"`).
-
-Do **not** touch `equip_hint` or `rig_button_label` in either file — `bundleRebuildPreservation.test.ts` still asserts their exact contents.
-
-- [ ] **Step 8: Run the full suite**
+- [ ] **Step 7: Run the full suite**
 
 Run: `npm test`
 Expected: `Test Files 17 passed (17)`, `Tests 63 passed (63)`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add web/src/components/Keycap.tsx web/src/components/__tests__/Keycap.test.tsx web/src/components/PromptHud.tsx web/src/style.css locales/th.json locales/en.json
+git add web/src/components/Keycap.tsx web/src/components/__tests__/Keycap.test.tsx web/src/components/PromptHud.tsx web/src/style.css
 git commit -m "feat(hud): add Keycap chip and wire PromptHud to it
 
-One key-chip component, used wherever the HUD says 'press this'. locale
-strings already wrote keys as [E]/[X]/[G]; renderWithKeycaps splits on
-that and drops the brackets, leaving surrounding text byte-identical.
+One key-chip component, used wherever the HUD says 'press this'. The
+locale strings already wrote keys as [E]/[X]/[G]; renderWithKeycaps
+splits on that and drops the brackets, leaving surrounding text
+byte-identical.
 
-ui_bite_prompt and ui_reel_title gain the same brackets so the bite alert
-and the reel title can use the chip too. equip_hint and rig_button_label
-are untouched — the preservation suite still asserts their contents.
+The two ui_* strings that still lack brackets are left alone here.
+Bracketing them before their components render through the chip would
+show a literal [SPACE] on screen, and no test would catch it — so those
+edits ship with the components that consume them.
 
 renderWithKeycaps lives in Keycap.tsx rather than promptText.ts because
 it emits JSX and promptText.ts is a .ts file whose string behaviour is
@@ -731,8 +717,15 @@ Named properties only, per Global Constraint 4.
 
 - [ ] **Step 5: Confirm nothing still references the deleted classes**
 
-Run: `npx rg -n "\"panel |'panel |className=\"panel|\bbtn\b" web/src --glob '!node_modules'`
-Expected: no hits in `web/src/components/`. Hits inside `web/src/admin/` are fine and must be left alone — the admin panel has its own `admin.css`.
+Run: `npx rg -n 'className="panel |className="btn|className="btn btn-primary|"panel ' web/src/components`
+Expected: no hits at all.
+
+Do **not** grep for a bare `btn` — it matches the `hud-btn` and `hud-btn--primary` you just wrote and reads as a false failure.
+
+Then check the stylesheet: `npx rg -n '^\.panel \{|^\.btn' web/src/style.css`
+Expected: no hits. `.panel-title` survives and is correct — the patterns above require a space or `{` right after `.panel`, and `^\.btn` will not match `.hud-btn`.
+
+Hits inside `web/src/admin/` are expected and must be left alone — the admin panel has its own `admin.css` and is out of scope.
 
 - [ ] **Step 6: Run the full suite**
 
@@ -814,14 +807,21 @@ The panel enters from the right, matching RigMenu's existing `slideFromRight`, a
 
 Leave `.rig-flyout-panel`'s `slideLeft 200ms ease-out` alone — it is a nested reveal, not a surface entrance, and Task 10 handles the rig menu.
 
-- [ ] **Step 4: Run the full suite**
+- [ ] **Step 4: Confirm `.rig-menu` still declares `background: transparent` verbatim**
+
+Run: `npx rg -n -A 10 "^\.rig-menu \{" web/src/style.css`
+Expected: the rule still contains the literal line `background: transparent;`. You only changed its `animation` line, so this should hold — confirm it anyway.
+
+The reason is a late, expensive failure mode. `rigMenuBundleRebuild.exploration.test.ts:99` asserts the **built** `.rig-menu` rule body contains `background:transparent`, string-scanning minified CSS. That test reads `web/dist`, which is not rebuilt until Task 11 — so tidying this rule away here would not surface for another six tasks.
+
+- [ ] **Step 5: Run the full suite**
 
 Run: `npm test`
 Expected: `Test Files 17 passed (17)`, `Tests 63 passed (63)`.
 
 `rigMenuHudStyle.exploration.test.tsx` asserts `.rig-menu` has no `var(--bg)`, `var(--border)`, `var(--accent)`, `box-shadow`, or `backdrop-filter`. `var(--dur-base)` and `var(--ease-out)` are none of those, so it stays green — but re-read the failure output carefully if it does not.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add web/src/style.css
@@ -1011,6 +1011,7 @@ The bite alert is the highest-stakes moment in the loop. The existing treatment 
 **Files:**
 - Modify: `web/src/components/WaitingHud.tsx`
 - Modify: `web/src/style.css`
+- Modify: `locales/th.json`, `locales/en.json` (`ui_bite_prompt` only)
 
 **Interfaces:**
 - Consumes: `renderWithKeycaps` from `./Keycap` (Task 3), `.hud-panel--warn` (Task 2).
@@ -1100,22 +1101,38 @@ Delete `@keyframes shake` (L119-123) — `.bite-text` was its only consumer. Rep
 
 `biteBeat` and the `keycap--urgent` animation from Task 3 both run at `0.9s`, so the text and the `[SPACE]` chip pulse on the same beat.
 
-`.bite-panel` sets its own `animation`, which overrides the `panelIn` it would otherwise inherit from `.hud-panel` — intended: the bite gets a sharper entrance than a normal panel.
+`.bite-panel` sets its own `animation`, which overrides the `panelIn` it inherits from `.hud-panel` — intended: the bite deserves a sharper entrance than a normal panel. That override works purely on source order: `.hud-panel` and `.bite-panel` are both single-class selectors, so specificity ties and the later rule wins. `.hud-panel` sits near L53 (Task 2 placed it just below the old `.panel`) and `.bite-panel` sits near L111. **Keep `.bite-panel` below `.hud-panel` in the file.** Reordering them silently reverts the bite entrance to `panelIn`.
 
-- [ ] **Step 4: Verify no orphans remain**
+- [ ] **Step 4: Bracket `ui_bite_prompt` now that the component renders it through the chip**
+
+Brackets are the only change; the wording stays exactly as it is today.
+
+`locales/th.json` — from `"กด SPACE"` to:
+```json
+  "ui_bite_prompt": "กด [SPACE]",
+```
+
+`locales/en.json` — from `"PRESS SPACE"` to:
+```json
+  "ui_bite_prompt": "PRESS [SPACE]",
+```
+
+Leave `ui_reel_title` alone — Task 8 owns it. Leave `equip_hint` and `rig_button_label` alone permanently.
+
+- [ ] **Step 5: Verify no orphans remain**
 
 Run: `npx rg -n "waiting-dot|keyframes pulse|keyframes shake" web/src`
 Expected: no hits.
 
-- [ ] **Step 5: Run the full suite**
+- [ ] **Step 6: Run the full suite**
 
 Run: `npm test`
 Expected: `Test Files 17 passed (17)`, `Tests 63 passed (63)`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/src/components/WaitingHud.tsx web/src/style.css
+git add web/src/components/WaitingHud.tsx web/src/style.css locales/th.json locales/en.json
 git commit -m "feat(hud): ripple while waiting, a real beat when the fish bites
 
 The waiting dot becomes an expanding ripple ring, reading as a float
@@ -1125,7 +1142,10 @@ followed by a two-beat pulse. The [SPACE] keycap runs on the same 0.9s
 period, so text and chip pulse together.
 
 Removes @keyframes pulse and @keyframes shake along with .waiting-dot;
-this change was their only consumer."
+this change was their only consumer.
+
+ui_bite_prompt gains its [SPACE] brackets in this commit rather than
+with the Keycap component, so the string is never rendered raw."
 ```
 
 ---
@@ -1137,9 +1157,10 @@ this change was their only consumer."
 **Files:**
 - Modify: `web/src/components/TensionMinigame.tsx`
 - Modify: `web/src/style.css`
+- Modify: `locales/th.json`, `locales/en.json` (`ui_reel_title` only)
 
 **Interfaces:**
-- Consumes: `.hud-panel--danger` (Task 2), `.reel-panel { position: relative }` (Task 4), `renderWithKeycaps` (Task 3), bracketed `ui_reel_title` (Task 3).
+- Consumes: `.hud-panel--danger` (Task 2), `.reel-panel { position: relative }` (Task 4), `renderWithKeycaps` (Task 3).
 - Produces: nothing later tasks depend on.
 
 `EngineState` (`web/src/engine/minigameEngine.ts:11-21`) exposes `tension`, `greenLo`, `greenHi`, `overTension`, `energyPct`. Everything below derives from those — no engine change.
@@ -1227,27 +1248,43 @@ Replace the `.green-zone` rule (L129-135) with the version below and append the 
 }
 ```
 
-- [ ] **Step 3: Confirm the Tier A guard still holds**
+- [ ] **Step 3: Bracket `ui_reel_title` now that the title renders through the chip**
+
+Brackets are the only change; the wording stays exactly as it is today.
+
+`locales/th.json` — from `"ดึงปลา — กด SPACE ค้าง"` to:
+```json
+  "ui_reel_title": "ดึงปลา — กด [SPACE] ค้าง",
+```
+
+`locales/en.json` — from `"Reel — hold SPACE"` to:
+```json
+  "ui_reel_title": "Reel — hold [SPACE]",
+```
+
+This is the last locale edit in the plan. `equip_hint` and `rig_button_label` remain untouched.
+
+- [ ] **Step 4: Confirm the Tier A guard still holds**
 
 Run: `npx vitest --run src/__tests__/hudStyle.test.tsx`
 Expected: PASS, 5 tests — in particular `.tension-marker declares no transition duration` and `.energy-fill declares no transition duration`.
 
 `.green-zone` is deliberately **not** in the guard set: it legitimately carries a `120ms` transition on `background`/`box-shadow`, and the guard regex would reject it. Its positional properties are inline styles, which no stylesheet rule can transition.
 
-- [ ] **Step 4: Confirm the marker is genuinely untransitioned**
+- [ ] **Step 5: Confirm the marker is genuinely untransitioned**
 
 Run: `npx rg -n "transition" web/src/style.css`
 Read every hit. Confirm that neither `.tension-marker`, `.energy-fill`, nor `.bar-fill`-with-a-duration applies to the marker. Expected: `.bar-fill` has `width 60ms linear` (cast bar only, overridden on `.energy-fill`), `.energy-fill` has `none`, `.tension-marker` has `none`, `.green-zone` names only `background` and `box-shadow`, and the rig/button rules are unrelated.
 
-- [ ] **Step 5: Run the full suite**
+- [ ] **Step 6: Run the full suite**
 
 Run: `npm test`
 Expected: `Test Files 17 passed (17)`, `Tests 63 passed (63)`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/src/components/TensionMinigame.tsx web/src/style.css
+git add web/src/components/TensionMinigame.tsx web/src/style.css locales/th.json locales/en.json
 git commit -m "feat(hud): show the player when they are in the zone
 
 The green zone now glows while the marker is inside it — moment-to-moment
@@ -1488,6 +1525,8 @@ Leave that rule's existing `transition: all 150ms ease` alone. It predates this 
 
 Run: `npx vitest --run src/__tests__/rigMenuHudStyle.exploration.test.tsx src/__tests__/rigMenuPreservation.test.tsx src/__tests__/rigMenuIconPreservation.test.tsx src/components/__tests__/RigMenu.test.tsx`
 Expected: all PASS. `rigMenuHudStyle` checks `.rig-menu__title` and `.rig-category-card__title` still declare `text-shadow` — `var(--hud-shadow-text)` satisfies it.
+
+One thing the tests cannot see: `animationDelay` is an inline style, so it is re-applied on every React re-render, and `.rig-category-card` re-renders on hover. The delay value does not change between renders, so `rowIn` should not restart — but this is the one surface in the plan where a stagger sits on a frequently re-rendering element. Note it for the manual pass; if hovering visibly re-triggers the entrance, move the delay into `:nth-child()` rules in CSS instead.
 
 - [ ] **Step 6: Run the full suite**
 
