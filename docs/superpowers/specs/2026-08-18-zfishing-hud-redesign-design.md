@@ -103,6 +103,12 @@ Two reasons: it mirrors RigMenu's existing `border-left` idiom exactly, and the
 single slide+fade on the whole panel (`panelIn`), which carries the rail with
 it — a separately animated rail was dropped as unnecessary.
 
+`.hud-panel` also carries `text-shadow: var(--hud-shadow-text)` for a deliberate
+reason: `text-shadow` is an inherited property, so every descendant —
+`.panel-title`, `.bar-caption`, `.info-row`, `.catch-weight` — gets it for free.
+That single declaration is what meets the legibility goal without per-element
+rules. Do not "fix" it later by adding redundant per-element shadows.
+
 Note: this does not conflict with `rigMenuHudStyle.exploration.test.tsx`. That
 test constrains the `.rig-menu` container rule specifically; `.hud-panel` is a
 new selector and `.rig-category-card` (which legitimately uses `var(--accent)`)
