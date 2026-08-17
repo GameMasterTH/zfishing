@@ -97,8 +97,11 @@ The rail is also a **state channel and a motion element**:
 | `--warn` (amber) | Cast charging, fish biting |
 | `--danger` (red) | Over-tension |
 
-On panel entrance the rail draws in with `transform: scaleY(0) → scaleY(1)`,
-`transform-origin: top`.
+The rail is a static `border-left` on `.hud-panel` itself, not a pseudo-element.
+Two reasons: it mirrors RigMenu's existing `border-left` idiom exactly, and the
+§8.2 guard asserts `.hud-panel` declares `border-left`. Panel entrance is a
+single slide+fade on the whole panel (`panelIn`), which carries the rail with
+it — a separately animated rail was dropped as unnecessary.
 
 Note: this does not conflict with `rigMenuHudStyle.exploration.test.tsx`. That
 test constrains the `.rig-menu` container rule specifically; `.hud-panel` is a
