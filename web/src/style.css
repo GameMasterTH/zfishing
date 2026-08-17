@@ -264,10 +264,42 @@ html, body, #root {
 
 /* catch card */
 .catch-card { text-align: center; pointer-events: auto; }
-.catch-name { font-size: 2.4vh; font-weight: 700; }
-.catch-weight { font-size: 1.7vh; color: var(--muted); margin-top: 0.4vh; }
-.catch-stars { font-size: 2vh; color: var(--warn); margin: 0.8vh 0 1.2vh; letter-spacing: 0.2em; }
-.catch-actions { display: flex; gap: 0.6vw; justify-content: center; }
+/* ลำดับเวลาการเผยผล: ชื่อ 60ms, น้ำหนัก 140ms, ดาว 260ms +90ms/ดวง, ปุ่ม 740ms
+   ดาวดวงสุดท้ายเริ่ม 620ms ยาว 260ms — ปุ่มมาทับตอนมันยังเข้าที่อยู่ ตั้งใจให้ซ้อน */
+.catch-name {
+  font-size: 2.4vh;
+  font-weight: 700;
+  animation: riseIn var(--dur-base) var(--ease-out) 60ms both;
+}
+.catch-weight {
+  font-size: 1.7vh;
+  color: var(--muted);
+  margin-top: 0.4vh;
+  animation: riseIn var(--dur-base) var(--ease-out) 140ms both;
+}
+.catch-stars {
+  font-size: 2vh;
+  margin: 0.8vh 0 1.2vh;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+/* inline-block จำเป็น — transform ไม่มีผลกับ inline box */
+.catch-star {
+  display: inline-block;
+  animation: starPop 260ms var(--ease-out) both;
+}
+.catch-star--filled { color: var(--warn); }
+.catch-actions {
+  display: flex;
+  gap: 0.6vw;
+  justify-content: center;
+  animation: riseIn var(--dur-base) var(--ease-out) 740ms both;
+}
+@keyframes starPop {
+  0%   { opacity: 0; transform: scale(0.4); }
+  60%  { opacity: 1; transform: scale(1.25); }
+  100% { opacity: 1; transform: scale(1); }
+}
 /* buttons */
 .hud-btn {
   pointer-events: auto;
