@@ -405,28 +405,28 @@ html, body, #root {
   font-size: 2.6vh;
   font-weight: 700;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   margin-bottom: 0.4vh;
 }
 
 .rig-menu__hint {
   font-size: 1.5vh;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   margin-bottom: 1.2vh;
 }
 
 .rig-menu__locale-error {
   font-size: 1.2vh;
   color: var(--warn);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   margin-bottom: 1vh;
 }
 
 .rig-menu__empty {
   font-size: 1.5vh;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   padding: 1.2vh 0;
   text-align: center;
 }
@@ -445,6 +445,7 @@ html, body, #root {
   padding: 0.8vh 0.6vw;
   cursor: pointer;
   transition: all 150ms ease;
+  animation: rowIn var(--dur-base) var(--ease-out) both;
 }
 
 .rig-category-card:hover,
@@ -467,7 +468,7 @@ html, body, #root {
   font-size: 1.8vh;
   font-weight: 700;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-category-card:hover .rig-category-card__title,
@@ -477,13 +478,13 @@ html, body, #root {
 
 .rig-category-card__pin {
   font-size: 1.2vh;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-category-card__status {
   font-size: 1.4vh;
   color: rgba(255, 255, 255, 0.8);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   margin-top: 0.3vh;
 }
 
@@ -523,7 +524,7 @@ html, body, #root {
   font-size: 2.2vh;
   font-weight: 700;
   color: var(--accent);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-flyout-panel__close {
@@ -531,7 +532,7 @@ html, body, #root {
   border: none;
   color: #fff;
   font-size: 1.8vh;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   cursor: pointer;
 }
 
@@ -595,12 +596,12 @@ html, body, #root {
 
 .rig-item-row__label {
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-item-row__owned {
   color: rgba(232, 237, 242, 0.7);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-item-row__actions {
@@ -612,14 +613,14 @@ html, body, #root {
 .rig-item-row__arrow {
   color: #fff;
   font-size: 1.2vh;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   padding: 0.2vh 0.3vw;
   cursor: pointer;
 }
 
 .rig-item-row__empty {
   color: rgba(232, 237, 242, 0.5);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 /* Redesigned HUD Buttons */
@@ -629,7 +630,7 @@ html, body, #root {
   font-weight: 700;
   cursor: pointer;
   transition: all 150ms ease;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
 }
 
 .rig-btn--attach,
@@ -681,7 +682,7 @@ html, body, #root {
   align-items: center;
   font-size: 1.3vh;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  text-shadow: var(--hud-shadow-text);
   padding: 0.4vh 0.6vw;
   background: transparent;
   cursor: pointer;

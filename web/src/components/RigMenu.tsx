@@ -89,10 +89,11 @@ export default function RigMenu({ view, catalog }: Props) {
           </div>
 
           <div className="rig-menu__categories">
-            {categories.map((cat) => (
+            {categories.map((cat, index) => (
               <CategoryCard
                 key={cat.partType}
                 category={cat}
+                index={index}
                 isActive={currentCategory?.partType === cat.partType}
                 isLocked={lockedCategory === cat.partType}
                 onHover={() => handleCategoryHover(cat.partType)}
@@ -108,12 +109,14 @@ export default function RigMenu({ view, catalog }: Props) {
 
 function CategoryCard({
   category,
+  index,
   isActive,
   isLocked,
   onHover,
   onClick,
 }: {
   category: CategoryGroup
+  index: number
   isActive: boolean
   isLocked: boolean
   onHover: () => void
@@ -128,6 +131,7 @@ function CategoryCard({
       className={`rig-category-card ${isActive ? 'rig-category-card--active' : ''} ${
         isLocked ? 'rig-category-card--locked' : ''
       }`}
+      style={{ animationDelay: `${index * 50}ms` }}
       onMouseEnter={onHover}
       onClick={onClick}
     >
