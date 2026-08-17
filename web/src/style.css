@@ -14,6 +14,14 @@
   --muted: #8fa3b3;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   --font: 'Noto Sans Thai', 'Segoe UI', Roboto, sans-serif;
+
+  /* Water HUD: shared surface + motion tokens */
+  --hud-shadow-text: 0 1px 3px rgba(0, 0, 0, 0.9);
+  --hud-scrim: rgba(6, 10, 14, 0.55);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --dur-slow: 380ms;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
@@ -51,6 +59,27 @@ html, body, #root {
   backdrop-filter: blur(4px);
 }
 
+/* ---------------------------------------------------------------- Water HUD
+   Transparent surface. The 2px left rail is the only chrome, and its colour
+   carries state. No ground, no border box, no shadow, no blur — legibility
+   comes from text-shadow, with one scrim on .bar-track (the tension marker is
+   the one element where a misread costs the player the fish).
+
+   No `box-shadow: none` / `backdrop-filter: none` resets here: this is a fresh
+   class with nothing to reset, and hudStyle.test.tsx asserts those declaration
+   names are absent. */
+.hud-panel {
+  background: transparent;
+  border-left: 2px solid var(--rail, var(--accent));
+  padding: 1.4vh 1.2vw;
+  color: var(--text);
+  min-width: 16vw;
+  text-shadow: var(--hud-shadow-text);
+}
+
+.hud-panel--warn   { --rail: var(--warn); }
+.hud-panel--danger { --rail: var(--danger); }
+
 .panel-title {
   font-size: 1.35vh;
   font-weight: 700;
@@ -78,7 +107,7 @@ html, body, #root {
   position: relative;
   width: 100%;
   height: 1.6vh;
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--hud-scrim);
   border: 1px solid var(--border);
   overflow: hidden;
 }
@@ -136,10 +165,12 @@ html, body, #root {
 .tension-marker {
   position: absolute;
   top: -0.3vh;
-  width: 0.3vw;
+  width: 2px;
   height: 2.2vh;
   background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85);
   transform: translateX(-50%);
+  transition: none;
 }
 .tension-marker.danger { background: var(--danger); }
 .bar-row { display: flex; justify-content: space-between; align-items: baseline; }
