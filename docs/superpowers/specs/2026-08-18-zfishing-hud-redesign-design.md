@@ -133,7 +133,33 @@ hairline. It is the only opaque element left in the HUD.
 (`box-shadow: 0 0 0 1px rgba(0,0,0,.85)`) so it reads against both the scrim and
 the teal green-zone fill.
 
-### 4.4 Corners
+### 4.4 Locked colour constraint (do not "tokenize" these six)
+
+`rigMenuBundleRebuild.exploration.test.ts:106-118` asserts, against the **built**
+`web/dist` CSS, that six selectors each contain both `text-shadow` and the
+literal substring `#fff`:
+
+`.rig-menu__title`, `.rig-menu__hint`, `.rig-menu__empty`,
+`.rig-category-card__title`, `.rig-category-card__status`, `.rig-item-row__label`
+
+The mechanism is load-bearing and invisible in source. `.rig-category-card__status`
+is authored as `color: rgba(255, 255, 255, 0.8)` and only passes because the
+minifier emits `#fffc`, which *contains* `#fff`. Verified against the current
+bundle:
+
+```
+.rig-category-card__status{font-size:1.4vh;color:#fffc;text-shadow:0 1px 3px rgba(0,0,0,.9);margin-top:.3vh}
+```
+
+Therefore:
+
+- Replacing these selectors' `text-shadow` value with `var(--hud-shadow-text)`
+  is **safe** — the assertion matches the declaration name, not the value.
+- Changing any of these six `color:` values to a token is **not safe**.
+  `--text` is `#e8edf2`. A well-meaning "unify all colours onto tokens" pass is
+  exactly how this breaks.
+
+### 4.5 Corners
 
 `* { border-radius: 0 !important }` (`style.css:19`) is an explicit existing
 decision. The whole redesign is sharp-cornered, including the keycap chip
@@ -241,13 +267,16 @@ stay in Tier A.
 | `web/src/components/FishingInfoCard.tsx` | Stagger index on rows; `.hud-panel` |
 | `web/src/components/WaitingHud.tsx` | Ripple; bite entrance; keycap; `.hud-panel` |
 | `web/src/components/TensionMinigame.tsx` | `inZone` class; `.hud-panel` |
-| `web/src/components/CatchCard.tsx` | Star array; keycap buttons; `.hud-panel` |
+| `web/src/components/CatchCard.tsx` | Star array; `.btn`/`.btn-primary` → `.hud-btn`/`.hud-btn--primary`; `.hud-panel` |
 | `web/src/components/RigMenu.tsx` | Stagger index only |
 | `locales/th.json`, `locales/en.json` | Bracket `ui_bite_prompt`, `ui_reel_title` |
 | `web/src/__tests__/bundleRebuildPreservation.test.ts` + `.snap` | Prune (§8) |
 | `web/src/__tests__/hudStyle.test.tsx` | **New** (§8) |
 
 ## 8. Testing
+
+Obsolete preservation guards live in **three** files, not one. Each is handled
+differently — see 8.1, 8.1a, 8.1b.
 
 ### 8.1 Prune `bundleRebuildPreservation.test.ts`
 
@@ -279,6 +308,27 @@ updated on every future CSS edit while catching no real bug.
 - The `ui_page` / `files` manifest assertions.
 - The `locales` assertions for `equip_hint` `[G]` and `rig_button_label`.
 
+### 8.1a Prune `rigMenuIconPreservation.test.tsx`
+
+**Delete** the final block, `describe('Preservation: HUD อื่นใน bundle เดียวกัน
+ไม่ถูกกระทบ (3.4)')` at L152-176. It asserts `.panel` cssText contains
+`var(--bg)` (L158, commented "ยังคงพื้นหลังทึบเดิมของ panel") and that
+`.cast-fill`, `.prompt-hud`, `.prompt-title`, `.catch-card`, `.btn` rules exist.
+`.panel` and `.btn` cease to exist in this redesign.
+
+**Keep** everything above it, including `describe('Preservation: สไตล์เมนู
+.rig-menu โปร่งใส + text-shadow (3.2)')` at L137-150 — both of its assertions
+(`.rig-menu` contains `transparent`, `.rig-category-card__title` has
+`text-shadow`) remain true after the redesign.
+
+### 8.1b Leave `rigMenuBundleRebuild.exploration.test.ts` untouched
+
+No deletion. Its `.rig-menu` transparency check and its `TEXT_SELECTORS`
+`text-shadow`+`#fff` check both stay valid and become the rig-side guard for
+§4.4. Its `OLD_HASH_FILES` assertions only check for the absence of two specific
+stale bundle hashes (`index-DLW4jjFM.css`, `index-zLgQY8bw.js`), so a rebuild
+keeps them passing.
+
 ### 8.2 New `web/src/__tests__/hudStyle.test.tsx`
 
 Mirrors the pattern of `rigMenuHudStyle.exploration.test.tsx`: read
@@ -292,16 +342,37 @@ Assertions:
    `backdrop-filter`.
 2. `.hud-panel` declares `border-left` (the rail signature survives).
 3. `.bar-track` declares a background (the D2 scrim survives).
-4. **`.tension-marker` and `.energy-fill` declare no `transition`** — the Tier A
-   regression guard. This is the highest-value assertion in the file.
+4. **Neither `.tension-marker` nor `.energy-fill` declares a *timed* transition**
+   — the Tier A regression guard, and the highest-value assertion in the file.
+
+   It must be phrased as the absence of a duration, not the absence of the
+   `transition` property. `.energy-fill` is rendered as
+   `class="bar-fill energy-fill"` and `.bar-fill` carries
+   `transition: width 60ms linear` (`style.css:85`), so `.energy-fill` *must*
+   keep `transition: none` as the override that makes Tier A work. Asserting
+   "no `transition` declaration" would forbid the exact line the design
+   requires. Use:
+
+   ```
+   expect(rule!.style.cssText).not.toMatch(/transition:[^;]*\d+\s*m?s/)
+   ```
+
+   This passes on `transition: none` and on no declaration at all, and fails the
+   moment someone adds `transition: left 80ms` to the marker.
 
 ### 8.3 Existing tests that must stay green
 
 `App.test.tsx`, `PromptHud.test.tsx`, `RigMenu.test.tsx`,
-`rigMenuHudStyle.exploration.test.tsx`, `rigMenuIconPreservation.test.tsx`,
-`rigMenuPreservation.test.tsx`, `rigMenuIconOversize.exploration.test.tsx`,
-`localeTextPreservation.test.ts`, `promptText.test.ts`, `rigRows.test.ts`,
-`rigText.test.ts`, `minigameEngine.test.ts`.
+`rigMenuHudStyle.exploration.test.tsx`, `rigMenuIconPreservation.test.tsx`
+(minus the block deleted in 8.1a), `rigMenuPreservation.test.tsx`,
+`rigMenuIconOversize.exploration.test.tsx`,
+`rigMenuBundleRebuild.exploration.test.ts`, `localeTextPreservation.test.ts`,
+`promptText.test.ts`, `rigRows.test.ts`, `rigText.test.ts`,
+`minigameEngine.test.ts`, `equipHintPrompt.exploration.test.ts`.
+
+Baseline measured on `main` at commit `5980544`, before any redesign work:
+**15 test files, 55 tests, all passing**, ~28s wall clock. After the redesign the
+count changes only by the deletions in 8.1/8.1a and the additions in 8.2.
 
 ### 8.4 Build and deploy
 
@@ -310,8 +381,12 @@ Assertions:
 → commit the regenerated `web/dist`. Verification order matters: the pruned
 preservation test parses the built CSS, so it must run after the build.
 
-Also check whether the copy at `c:\Users\GameMaster\Desktop\FiveM Server` needs
-syncing before live testing.
+**No deploy step in this plan.** `rigMenuBundleRebuild.exploration.test.ts:31-32`
+names a deploy copy at
+`c:\Users\GameMaster\Desktop\FiveM Server\txData\QBCore_E66DFA.base\resources\[zlab]\zfishing\web\dist`.
+That path was checked and **does not exist**, so the test's deploy-copy
+assertion early-returns at L128 and is inert. Copying to a live server is a
+separate, manual step outside this change.
 
 ## 9. Out of scope
 
