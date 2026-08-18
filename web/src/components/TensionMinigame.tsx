@@ -12,6 +12,8 @@ type Props = {
   snapFactor: number
   drainRate: number // reel quality: multiplies how fast the fish tires (1 = base)
   fishWeight: number // actual rolled weight in kg — drives green zone amplitude & speed
+  baseDrain: number // energy drained per second in the green zone (server-authoritative)
+  reelTimeout: number // ms before the fight is lost (server-authoritative)
   holding: boolean
 }
 

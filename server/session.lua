@@ -181,6 +181,8 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
             greenZone = rodCfg.greenZone or 0.0,
             snapFactor = snapFactor,
             drainRate = s.reelDrain or 1.0,   -- reel quality = how fast the fish tires
+            baseDrain = Config.Minigame.baseDrain,   -- authoritative; the server validates against it
+            reelTimeout = Config.Timings.reelTimeout, -- single source of truth for the fight clock
             fishWeight = fish.weight,          -- actual rolled weight for NUI dynamics
         })
         -- if the player never presses hook, don't leave the session stuck
@@ -216,12 +218,18 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     if s.state ~= 'reeling' then return { ok = false } end
     local fish = s.fish
 
-    -- minimum plausible reel time: NUI drains 12 * drainRate energy/sec in the
-    -- green zone, so a real catch can never finish faster than this
-    local drain = s.reelDrain or 1.7   -- v1 path: assume the fastest reel (lenient)
-    local minMs = (fish.fishEnergy / (12 * drain)) * 1000
+    -- Minimum plausible reel time. The NUI drains baseDrain * drainRate energy
+    -- per second while in the green zone, so a real catch can never finish
+    -- faster than this. drainRate defaults to 1.0 to match exactly what the bite
+    -- payload told the client -- assuming a faster reel here would hand every
+    -- non-assembly player a 1.7x discount on the floor.
+    local drain = s.reelDrain or 1.0
+    local minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000
     local elapsed = GetGameTimer() - s.reelStart
-    if success and elapsed < minMs * 0.6 then
+    -- 0.9 rather than a tighter value only to absorb frame quantisation: minMs
+    -- assumes a perfect green-zone hold for the whole fight, and network latency
+    -- only ever increases the elapsed time the server measures.
+    if success and elapsed < minMs * 0.9 then
         reset(src); return { ok = false, reason = 'too_fast' }
     end
     if elapsed > Config.Timings.reelTimeout + 5000 then

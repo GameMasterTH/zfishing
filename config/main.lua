@@ -16,6 +16,12 @@ Config.Timings = {
     hookLatency = 300,                    -- server grace for client latency
     reelTimeout = 30000,                  -- ms to finish reeling before fish escapes
 }
+-- Authoritative tension-minigame constants. The NUI receives these in the bite
+-- payload rather than hard-coding its own copies -- the server validates claims
+-- against the same numbers the client was told to play by.
+Config.Minigame = {
+    baseDrain = 12.0,   -- energy drained per second while the tension is in the green zone
+}
 Config.CastMaxDistance = 25.0             -- meters at full power
 -- true  = fishing only works inside a Config.Zones entry (current default)
 -- false = falls back to open water anywhere, using Config.DefaultWater as the pool

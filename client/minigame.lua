@@ -39,6 +39,7 @@ RegisterNetEvent('zfishing:bite', function(data)
         behavior = data.behavior, tensionDiff = data.tensionDiff,
         fishEnergy = data.fishEnergy, greenZone = data.greenZone,
         snapFactor = data.snapFactor, drainRate = data.drainRate,
+        baseDrain = data.baseDrain, reelTimeout = data.reelTimeout,
         fishWeight = data.fishWeight,
         startedAt = GetGameTimer() })
     Casting.StartFight()   -- bobber now tracks the fish's energy (see reelEnergy)

@@ -78,6 +78,8 @@ export default function App() {
               greenZone={data.greenZone ?? 0}
               snapFactor={data.snapFactor ?? 1}
               drainRate={data.drainRate ?? 1}
+              baseDrain={data.baseDrain ?? 12}
+              reelTimeout={data.reelTimeout ?? 28000}
               fishWeight={data.fishWeight ?? 5}
               holding={holding}
             />

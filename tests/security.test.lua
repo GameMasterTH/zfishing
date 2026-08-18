@@ -114,6 +114,7 @@ local function baseConfig()
     return {
         RateLimit = 6,
         Timings = { biteMin = 4000, biteMax = 12000, hookWindow = 1500, hookLatency = 300, reelTimeout = 30000 },
+        Minigame = { baseDrain = 12.0 },
         CastMaxDistance = 25.0,
         Durability = true, RodCanBreak = false, RequireAssembly = true, RequireZone = true,
         DefaultWater = 'ocean',
@@ -793,6 +794,34 @@ test('F7 a second claim during the reward yield is refused -- no double payout',
     local ok3, res3 = coroutine.resume(first)
     truthy(ok3)
     truthy(res3.ok, 'the original claim still settles successfully')
+    equal(rewardCalls.give, 1)
+end)
+
+test('F8 the claim floor uses the shipped drain, with no 1.7x hidden slack', function()
+    -- fishEnergy 50, no rig (reelDrain nil) -> the NUI is told drainRate 1.0,
+    -- so the true floor is 50 / (12 * 1.0) = 4166ms. The old code assumed 1.7
+    -- and then multiplied by 0.6, accepting claims from ~1470ms.
+    local _, rewardCalls = loadSession({ requireZone = false, mode = 'simple' })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+
+    _G.__NOW = _G.__NOW + 2000           -- under the real floor, over the old one
+    local early = CB['zfishing:claim'](5, cast.sessionId, 2000, true, nil)
+    falsy(early.ok, 'a 2s claim on a 4.2s floor must be refused')
+    equal(early.reason, 'too_fast')
+    equal(rewardCalls.give, 0)
+end)
+
+test('F9 an honest claim just over the floor is accepted', function()
+    local _, rewardCalls = loadSession({ requireZone = false, mode = 'simple' })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 4200           -- 50 / 12 = 4166ms floor, 0.9x = 3750ms
+    local claim = CB['zfishing:claim'](5, cast.sessionId, 4200, true, nil)
+    truthy(claim.ok, 'a claim past the floor must settle')
     equal(rewardCalls.give, 1)
 end)
 

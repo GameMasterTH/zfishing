@@ -6,6 +6,8 @@ export type EngineConfig = {
   snapFactor: number
   drainRate: number
   fishWeight: number
+  baseDrain: number   // authoritative, from Config.Minigame.baseDrain via the bite payload
+  reelTimeout: number // authoritative, from Config.Timings.reelTimeout via the bite payload
 }
 
 export type EngineState = {
@@ -132,7 +134,7 @@ export class MinigameEngine {
     this.tensionV = Math.max(0, Math.min(100, this.tensionV))
 
     if (this.tensionV >= gLo && this.tensionV <= gHi) {
-      this.energyV -= 12 * (this.config.drainRate || 1) * dt
+      this.energyV -= this.config.baseDrain * (this.config.drainRate || 1) * dt
     } else if (this.tensionV < gLo) {
       this.energyV = Math.min(this.config.fishEnergy, this.energyV + 3 * dt)
     }
@@ -159,7 +161,7 @@ export class MinigameEngine {
     } else if (this.snapMs >= this.snapBudget) {
       this.isFinished = true
       this.finishReason = 'snap'
-    } else if (elapsedMs >= 28000) {
+    } else if (elapsedMs >= this.config.reelTimeout) {
       this.isFinished = true
       this.finishReason = 'timeout'
     }
