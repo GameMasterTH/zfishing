@@ -357,6 +357,12 @@ Full session-state and callback contract: see `docs/ARCHITECTURE.md` §§2–3.
   species-average weight / 3★ quality and rod assembly is explicitly disabled
   (see **Rod assembly & durability**). This is decided up front by the pinned
   mode, not a silent runtime downgrade.
+- **The reel minigame decides its own outcome** — it runs entirely in the NUI,
+  which reports success or failure; the server only checks that the reported
+  duration is plausible for the fish rolled, not the outcome itself (see
+  **Anti-cheat model** above). See
+  `docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md` for
+  the rewrite that would close this.
 
 Implemented since v1: per-hook mechanics, reel drain speed, float bite speed,
 and full component durability — all wired through the assembled rod.

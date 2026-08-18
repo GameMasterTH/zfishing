@@ -22,7 +22,9 @@ secret. After a delay, the server tells the client a fish is biting and ships on
 *abstracted* fight parameters. The player passes a hook QTE, then plays a tension
 minigame that runs entirely in a React NUI page. The NUI reports the outcome, and
 the server validates the claim against timing plausibility before granting the item
-and writing XP + a catch log row. Everything that matters is server-authoritative.
+and writing XP + a catch log row. The roll, the grant, and every state transition
+are server-authoritative; the minigame *outcome* is not — see
+`docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md`.
 
 Version at time of writing: `1.0.0`. Roughly 2,700 lines of Lua and 1,500 lines of
 TypeScript/TSX source.
@@ -279,8 +281,8 @@ ped, and hides any TextUI. Any new exit condition must route through it.
 13. The NUI runs `MinigameEngine` in a RAF loop. It streams `reelEnergy` back
     (throttled: at most every 150ms, and only on a ≥1% change) so the bobber moves
     smoothly, and on finish posts `reelResult { success, reason, durationMs }`.
-14. Client calls `zfishing:claim(sessionId, ...)`. Server locks the session into
-    `settling`, validates timing, grants the item, adds XP, logs the catch, rolls
+14. Client calls `zfishing:claim(sessionId, ...)`. Server validates timing, locks
+    the session into `settling`, grants the item, adds XP, logs the catch, rolls
     rare loot, increments the rate counter, resets.
 15. On success the client shows the catch card and takes NUI focus. The card's
     single "Continue" button fires the `keep` NUI callback, which closes the card
@@ -1010,6 +1012,11 @@ those elements makes the displayed value visibly lag the engine.
   weight and 3★ quality, and rod assembly is disabled.
 - `zfishing_players.stats` is written as `{}` and never read — a reserved hook.
 - `zfishing_zones.enabled` is honored on load but has no UI.
+- The minigame outcome is decided client-side and reported to the server, which
+  only plausibility-checks it on timing (§3.1 `zfishing:claim`) — the server never
+  simulates the fight itself. See
+  `docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md` for
+  the exploit this leaves open and the rewrite that would close it.
 
 **Unverified:**
 
