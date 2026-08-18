@@ -24,10 +24,7 @@ export default function CatchCard(props: { label?: string; weight?: number; qual
       </div>
       <div className="catch-actions">
         <button className="hud-btn hud-btn--primary" onClick={() => fetchNui('keep')}>
-          {t('ui_keep')}
-        </button>
-        <button className="hud-btn" onClick={() => fetchNui('release')}>
-          {t('ui_release')}
+          {t('ui_continue')}
         </button>
       </div>
     </div>

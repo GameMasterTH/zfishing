@@ -91,4 +91,3 @@ local function closeCatchCard()
 end
 
 RegisterNUICallback('keep', function(_, cb) cb({}); closeCatchCard() end)
-RegisterNUICallback('release', function(_, cb) cb({}); closeCatchCard() end)

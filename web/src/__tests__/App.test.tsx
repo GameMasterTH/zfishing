@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, cleanup, waitFor, act } from '@testing-library/react'
+import { render, cleanup, waitFor, act, screen, fireEvent } from '@testing-library/react'
 
 // Mock เฉพาะ fetchNui ให้ resolve ทันที (คง useNuiEvent จริงไว้)
 // เหตุผล: App เรียก loadLocale() -> fetchNui('getLocale') ซึ่งใน jsdom จะ fetch ไป
@@ -20,6 +20,7 @@ vi.mock('../components/RigMenu', () => ({
 }))
 
 import App from '../App'
+import { fetchNui } from '../hooks/useNui'
 
 // Unit tests สำหรับ prompt handling ใน App state machine (task 5.2)
 //
@@ -146,5 +147,23 @@ describe('App rig menu dispatch', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-testid="rig-menu"]')).toBeNull()
     })
+  })
+})
+
+// Unit test สำหรับ catch card (task 7): Keep/Release เดิมทั้งคู่เรียก closeCatchCard()
+// เหมือนกัน (ปลาถูกมอบไปแล้วตอน claim ก่อนการ์ดจะ render) การเลือกจึงเป็นแค่ภาพลวงตา
+// เหลือปุ่มเดียว 'Continue' ที่ยังผูกกับ callback 'keep' เดิม (teardown path ฝั่ง Lua)
+
+describe('App catch card dispatch', () => {
+  it('the catch card offers a single Continue action', async () => {
+    render(<App />)
+
+    sendMessage({ action: 'caught', label: 'Bass', weight: 2.4, quality: 3 })
+
+    const buttons = await screen.findAllByRole('button')
+    expect(buttons).toHaveLength(1)
+
+    fireEvent.click(buttons[0])
+    expect(fetchNui).toHaveBeenCalledWith('keep')
   })
 })
