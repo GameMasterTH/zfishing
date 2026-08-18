@@ -825,6 +825,33 @@ test('F9 an honest claim just over the floor is accepted', function()
     equal(rewardCalls.give, 1)
 end)
 
+test('F10 the bite payload ships the authoritative baseDrain and reelTimeout', function()
+    -- App.tsx falls back to `?? 12` / `?? 28000` when a field is missing, so a
+    -- dropped payload field silently restores the old hard-coded constants and
+    -- the client/server drift this task removed comes back with every other
+    -- test still green. Assert the values, not just the keys: shipping a nil
+    -- would satisfy a presence-only check.
+    loadSession({ requireZone = false })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    TIMERS[1].fn()                       -- bite timer fires -> zfishing:bite
+
+    local bite
+    for _, ev in ipairs(spy.clientEvents) do
+        if ev.event == 'zfishing:bite' then bite = ev end
+    end
+    truthy(bite, 'the bite must reach the client')
+    equal(bite.target, 5, 'the bite goes to the casting player')
+    local payload = bite.args[1]
+    equal(payload.baseDrain, Config.Minigame.baseDrain,
+        'the NUI must be told the same drain the claim floor validates with')
+    equal(payload.reelTimeout, Config.Timings.reelTimeout,
+        'the NUI fight clock must be the server fight clock')
+    -- drainRate stays the reel-quality multiplier -- the two numbers must never
+    -- be merged or swapped (ARCHITECTURE §8 invariant 6)
+    equal(payload.drainRate, 1.0, 'drainRate is the reel multiplier, not the base drain')
+end)
+
 test('D4 assembly cast trusts the server-read slot, not a client-named one', function()
     loadSession({ requireAssembly = true, mode = 'enhanced', requireZone = false, durability = false })
     -- slot 99 is not owned by the player -> the server refuses
