@@ -608,8 +608,7 @@ end)
 
 test('F2 claim is refused unless the session is in the reeling state', function()
     loadSession({ requireZone = false })
-    local cast = CB['zfishing:cast'](5, 0.5)
-    falsy(CB['zfishing:claim'](5, cast.sessionId, 5000, true, nil).ok, 'cannot claim without a live reeling session')
+    falsy(CB['zfishing:claim'](5, 'anything', 5000, true, nil).ok, 'cannot claim without a live reeling session')
 end)
 
 test('F3 hook is refused after the hook window deadline passes', function()

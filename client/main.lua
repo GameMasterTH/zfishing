@@ -230,6 +230,15 @@ local function startFishing()
         return
     end
     ZClient.sessionId = res.sessionId
+    if not ZClient.active then
+        -- X was pressed while the cast callback was in flight: the keybind's own
+        -- cancel round-trip already ran (with no sessionId to send, since this one
+        -- hadn't landed yet) and could not have torn down the session the server
+        -- just created. Tear it down now with the real token so it doesn't sit in
+        -- 'waiting' spending bait on a bite nobody is around to see.
+        lib.callback.await('zfishing:cancel', false, ZClient.sessionId)
+        return
+    end
 
     if Config.FreezeWhileFishing and not boat then FreezeEntityPosition(PlayerPedId(), true) end
 

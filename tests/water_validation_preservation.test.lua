@@ -62,6 +62,12 @@ local function installHost(opts)
     local castOk = opts.castOk
     if castOk == nil then castOk = true end
     local castReason = opts.castReason
+    local castSessionId = opts.sessionId or 'sid-1'
+    -- simulates the real race (client/main.lua ~:232-241): a concurrent cancel
+    -- keybind thread runs to completion and flips ZClient.active off WHILE the
+    -- cast callback above is still in flight, before this mock returns to
+    -- startFishing() with the session the server just created.
+    local cancelDuringCast = opts.cancelDuringCast
 
     -- module globals redefined by dofile; nil old ones so a missing load is loud
     Config, ZClient, Anim, Casting = nil, nil, nil, nil
@@ -77,10 +83,15 @@ local function installHost(opts)
             await = function(name, ...)
                 if name == 'zfishing:cast' then
                     spy.castCalls = spy.castCalls + 1
-                    if castOk then return { ok = true, rod = 'rod', bait = 'worm' } end
+                    if castOk then
+                        if cancelDuringCast then ZClient.active = false end
+                        return { ok = true, sessionId = castSessionId, rod = 'rod', bait = 'worm' }
+                    end
                     return { ok = false, reason = castReason }
                 elseif name == 'zfishing:cancel' then
                     spy.cancelCalls = spy.cancelCalls + 1
+                    local _, sessionId = ...
+                    spy.lastCancelSessionId = sessionId
                     return true
                 end
                 return nil
@@ -365,6 +376,22 @@ test('Preservation: cancel (X) with no active session is a silent no-op (3.5)', 
     cancel()
     equal(#THREADS, before, 'no cleanup thread may be scheduled when inactive')
     equal(#spy.notifies, 0, 'an inactive cancel must not notify')
+end)
+
+-- Regression: X pressed while the cast callback is in flight must not leave a
+-- server-side session running with nobody watching for its bite (server bait
+-- spend on a ghost session). cancelDuringCast simulates the racing keybind
+-- thread completing (and turning ZClient.active off) before the cast await
+-- here returns with the sessionId the server just minted.
+test('Preservation: X during the cast round-trip tears down the session the server just minted', function()
+    local entry = loadClient({ preActive = false, inZone = true, power = 0.5,
+        castOk = true, waterSeq = { true, true },
+        cancelDuringCast = true, sessionId = 'sid-race' })
+    entry({ slot = 3 })
+    equal(spy.cancelCalls, 1, 'the session the server created during the race must be cancelled')
+    equal(spy.lastCancelSessionId, 'sid-race', 'cancel must carry the real token, not nil')
+    equal(spy.spawnFloatCalls, 0, 'no float may spawn for a session that is being torn down')
+    equal(ZClient.active, false, 'active must stay false -- no fishing UI takes over after the race')
 end)
 
 -- ---------------------------------------------------------------- runner

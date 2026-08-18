@@ -6,7 +6,7 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "client/anim.lua": "a41c11edbe07ade3a5b28ec15a645f383c32b77a10c60ef9e5ae5840ef17f0fc",
   "client/casting.lua": "3ec53c19561fc2cac62b8ada62a731845d20719386a2ed6342974b9b695bbadb",
   "client/float_kinematics.lua": "a5dd83f8086f29041c49882761ed0713fc00fb012b4fc89c88a9d2acd9b77357",
-  "client/main.lua": "53c94139d40d4f3f885cb88b11eaf10dc901cb83e7adbce2549ed61121135235",
+  "client/main.lua": "411378e0e739ad894a65ea5c7f5a8df15deba76e685ba4dc400d9bf697057f06",
   "client/minigame.lua": "7c85573262a807190d184456bf25fe499cf3514003e6713d11df9111bb969790",
   "client/rig.lua": "1a3ac6f498f172fae0a3eb54baf125313b8e1740247b919a88d334e4fc7ac7f4",
   "client/store.lua": "453a42253f1dfc410133080e3f1c96639d6a2ae5fa942ce8a8a28aa10632946b",
