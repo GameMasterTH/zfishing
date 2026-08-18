@@ -116,6 +116,17 @@ local function installHost(opts)
     _G.GetEntityCoords = function() return vec3(0.0, 0.0, 0.0) end
     _G.GetEntityForwardVector = function() return vec3(0.0, 1.0, 0.0) end
     _G.vector3 = vec3
+    -- boat-anchor probe (client/main.lua getFishingBoat, ~:103-114): these
+    -- suites are about water proximity, not boats, so "no vehicle found" is
+    -- the right default. 0 short-circuits getFishingBoat() before it reaches
+    -- DoesEntityExist/IsThisModelABoat.
+    _G.GetVehiclePedIsIn = function() return 0 end
+    _G.GetClosestVehicle = function() return 0 end
+    -- cleanup() (client/main.lua ~:128-145): fires a local event and checks
+    -- for an entity attachment on the way out. No-op / "not attached" is the
+    -- right default -- these suites don't exercise the rig menu or attaching.
+    _G.TriggerEvent = function() end
+    _G.IsEntityAttached = function() return false end
 
     -- THE water probe: returns the next scripted boolean. nearWater() takes the
     -- first return value only. Once the sequence is exhausted, repeat the last.
