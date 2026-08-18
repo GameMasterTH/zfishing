@@ -20,3 +20,30 @@ function ZUtil.weightedPick(list)
     end
     return list[#list]
 end
+
+-- Cheap fixed-window request gate. Runs in front of expensive validation so a
+-- flood of forged events costs a table lookup, not an inventory sweep or a fish
+-- roll. Windows are deliberately generous: network jitter and a double-tapped
+-- key must never trip it for an honest player.
+function ZUtil.MakeRateGate(limits)
+    local hits = {}
+    local gate = {}
+
+    function gate.allow(src, action)
+        local lim = limits[action]
+        if not lim then return true end
+        local now = GetGameTimer()
+        local bySrc = hits[src]
+        if not bySrc then bySrc = {}; hits[src] = bySrc end
+        local h = bySrc[action]
+        if not h or (now - h.since) >= lim.window then
+            bySrc[action] = { n = 1, since = now }
+            return true
+        end
+        h.n = h.n + 1
+        return h.n <= lim.max
+    end
+
+    function gate.forget(src) hits[src] = nil end
+    return gate
+end

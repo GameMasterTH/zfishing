@@ -16,6 +16,12 @@ local PART_TYPES = { 'reel', 'line', 'hook', 'float' }
 -- part type -> Config.Equipment slot key
 local SLOT_OF = { reel = 'reels', line = 'lines', hook = 'hooks', float = 'floats' }
 
+local gate = ZUtil.MakeRateGate({
+    get    = { max = 10, window = 5000 },
+    attach = { max = 10, window = 5000 },
+    detach = { max = 10, window = 5000 },
+})
+
 local function partCfg(partType, item)
     return Config.Equipment[SLOT_OF[partType]] and Config.Equipment[SLOT_OF[partType]][item]
 end
@@ -144,6 +150,7 @@ local function makePartMeta(partType, itemName, remainingDur)
 end
 
 lib.callback.register('zfishing:rig:get', function(src, slot)
+    if not gate.allow(src, 'get') then return { ok = false, err = 'too_many_requests' } end
     local s, meta = Rig.slotMeta(src, slot)
     if not s then return nil end
     -- carried spare parts, grouped by part type, so the client can offer them
@@ -173,6 +180,7 @@ lib.callback.register('zfishing:rig:get', function(src, slot)
 end)
 
 lib.callback.register('zfishing:rig:attach', function(src, slot, partType, itemName, partSlot)
+    if not gate.allow(src, 'attach') then return { ok = false, err = 'too_many_requests' } end
     if not SLOT_OF[partType] then return { ok = false, err = 'bad_part' } end
     local s, meta = Rig.slotMeta(src, slot)
     if not s then return { ok = false, err = 'no_rod' } end
@@ -219,6 +227,7 @@ lib.callback.register('zfishing:rig:attach', function(src, slot, partType, itemN
 end)
 
 lib.callback.register('zfishing:rig:detach', function(src, slot, partType)
+    if not gate.allow(src, 'detach') then return { ok = false, err = 'too_many_requests' } end
     if not SLOT_OF[partType] then return { ok = false, err = 'bad_part' } end
     local s, meta = Rig.slotMeta(src, slot)
     if not s then return { ok = false, err = 'no_rod' } end

@@ -414,6 +414,7 @@ local function loadRig(state)
     Config = baseConfig()
     local Z, inv, calls = makeZfishing(state)
     Zfishing = Z
+    dofile('shared/util.lua')
     dofile('shared/rig_rules.lua')
     dofile('server/rig.lua')
     return inv, calls
@@ -594,6 +595,35 @@ test('E4 cast is gated by the blocked contract and by an in-flight session', fun
     loadSession({ requireZone = false })
     truthy(CB['zfishing:cast'](5, 0.5).ok, 'first cast starts a session')
     equal(CB['zfishing:cast'](5, 0.5).reason, 'busy', 'a second concurrent cast is refused')
+end)
+
+test('E5 cast spam is rejected before it reaches the generator', function()
+    loadSession({ requireZone = false })
+    local rolls = 0
+    local realRoll = Generator.Roll
+    Generator.Roll = function(...) rolls = rolls + 1; return realRoll(...) end
+
+    local first = CB['zfishing:cast'](5, 0.5)
+    truthy(first.ok)
+    equal(rolls, 1)
+    CB['zfishing:cancel'](5, first.sessionId)   -- free the session so 'busy' cannot mask the gate
+
+    -- hammer it: the gate must refuse before the fish roll runs
+    for _ = 1, 20 do CB['zfishing:cast'](5, 0.5) end
+    equal(CB['zfishing:cast'](5, 0.5).reason, 'too_many_requests')
+    truthy(rolls <= 3, 'a spammed cast must not run the fish roll every time, got ' .. rolls)
+end)
+
+test('E6 the rate gate reopens after its window elapses', function()
+    loadSession({ requireZone = false })
+    local first = CB['zfishing:cast'](5, 0.5)
+    CB['zfishing:cancel'](5, first.sessionId)
+    for _ = 1, 20 do CB['zfishing:cast'](5, 0.5) end
+    equal(CB['zfishing:cast'](5, 0.5).reason, 'too_many_requests')
+
+    _G.__NOW = _G.__NOW + 5000      -- past every ACTION_LIMITS window
+    local after = CB['zfishing:cast'](5, 0.5)
+    truthy(after.reason ~= 'too_many_requests', 'the gate must reopen once the window passes')
 end)
 
 -- =============================================================== GROUP F

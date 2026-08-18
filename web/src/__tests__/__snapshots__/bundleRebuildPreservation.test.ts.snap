@@ -26,13 +26,13 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "server/lib.lua": "9111d1edbce2a1c79fe339d8c9d402235469a2dcf975d586914b1fda23f037aa",
   "server/progression.lua": "1d092840245e75760f704fef4e1c08f46528f4d768fcf6a441d48b3ce2f84693",
   "server/rewards.lua": "3f2fbdcc7cbc00136d583d98943d7f28cff042079a8d19af92afb91ea5acfb3e",
-  "server/rig.lua": "883b0950ff6a10811ccc729b9f1c6bc7950f4636a39efad21872d753c256375d",
-  "server/session.lua": "fc3c5d6416fb99a08c3d6a7ae9ca963ca9211ba1a3fbaf63bf129747b1b853fb",
+  "server/rig.lua": "a2c27921a29d0120567900658128b94d05d7b0cac0f4209d4a856dde110d8e61",
+  "server/session.lua": "4c532ff3df1b46404c09ac01b93c41419c0f3ba947af34645e5d1a86ad2078dc",
   "server/store.lua": "c2994354965a6d05909ecc42c99006f4da4d949c0c574ab05acf00cae11b8d0c",
   "server/usable.lua": "9ceec575f5ca9830847272f81f3cd727668eda1acc4d2c3a293ff43311ae96d6",
   "server/validate.lua": "c06b7084fa62f001764033cccecbc613c19136f60e6a0ea9f36240f99bd2d184",
   "server/weather.lua": "497109ebcac3482ee030fdffe46014f3cc73b6d5d90fce81199f668ce4c63585",
   "shared/rig_rules.lua": "84dc5ef067bfead3fe644dd2f2ababf35db4c65c97a8fb8052cbf432b074eb7d",
-  "shared/util.lua": "b539e2c2f2fe9bc8b01b8804aea53012cf88c9e7c24685d39d05d6f8386d7a52",
+  "shared/util.lua": "fda936508e22092f365c0c0248d0204b4497c3c0812ad8e9e14b518d7149a666",
 }
 `;

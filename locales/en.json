@@ -18,6 +18,7 @@
   "error_empty_water": "Nothing seems to live in this water",
   "error_no_zone": "No catchable fish in this area",
   "error_invalid_session": "That fishing session is no longer valid",
+  "error_too_many_requests": "Slow down",
   "cancel_hint": "[X] Pack up rod",
   "equip_hint": "[E] Start fishing   ·   [X] Pack up rod   ·   [G] Manage Rod",
   "equip_title": "Fishing",

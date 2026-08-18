@@ -6,6 +6,14 @@
 local sessions = {}   -- [src] = { state, fish, bait, rod, castAt, hookDeadline, reelStart, zone }
 local rate = {}       -- [src] = { count, windowStart }
 
+-- Per-action flood gate. Distinct from Config.RateLimit, which is the catch-rate
+-- economy control and only counts SUCCESSFUL catches. This one counts requests.
+local gate = ZUtil.MakeRateGate({
+    cast  = { max = 3, window = 2000 },
+    hook  = { max = 5, window = 2000 },
+    claim = { max = 3, window = 3000 },
+})
+
 local function reset(src) sessions[src] = nil end
 
 local nextSessionSeq = 0
@@ -90,6 +98,7 @@ local function resolveZone(src)
 end
 
 lib.callback.register('zfishing:cast', function(src, power, rodSlot)
+    if not gate.allow(src, 'cast') then return { ok = false, reason = 'too_many_requests' } end
     if Zfishing.Blocked() then return { ok = false, reason = 'unavailable' } end
     if sessions[src] then return { ok = false, reason = 'busy' } end
     if not withinRate(src) then return { ok = false, reason = 'rate' } end
@@ -187,6 +196,7 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
 end)
 
 lib.callback.register('zfishing:hook', function(src, sessionId)
+    if not gate.allow(src, 'hook') then return { ok = false, reason = 'too_many_requests' } end
     local s = sessionFor(src, sessionId)
     if not s then return { ok = false, reason = 'invalid_session' } end
     if s.state ~= 'hooking' then return { ok = false } end
@@ -200,6 +210,7 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
 end)
 
 lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)
+    if not gate.allow(src, 'claim') then return { ok = false, reason = 'too_many_requests' } end
     local s = sessionFor(src, sessionId)
     if not s then return { ok = false, reason = 'invalid_session' } end
     if s.state ~= 'reeling' then return { ok = false } end
@@ -263,5 +274,6 @@ end)
 AddEventHandler('playerDropped', function()
     local src = source
     reset(src); rate[src] = nil
+    gate.forget(src)
     BoatAnchor.OnDisconnect(src)
 end)
