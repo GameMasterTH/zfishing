@@ -322,8 +322,29 @@ grants 50 XP.
   trusted for the roll itself.
 - Every callback (`cast`/`hook`/`claim`) re-checks session state, inventory,
   hook-window timing, and minimum plausible reel duration.
+- Every cast mints a random per-session `sessionId`; `hook`, `claim`, and
+  `cancel` all require it and refuse a mismatch with `invalid_session` before
+  touching any state. This is stale-request and replay protection, **not**
+  secrecy — a modified client can read its own token back.
+- A claim locks the session in a `settling` state **before** the reward is
+  granted, so a claim replayed while the inventory/DB write is still in
+  flight is refused instead of paid out twice.
+- A per-action flood gate sits in front of `cast`/`hook`/`claim` and the rig
+  callbacks, rejecting a burst of requests before any inventory sweep or fish
+  roll runs. This is separate from `Config.RateLimit` below — that one throttles
+  the catch *economy* (successful catches only); the flood gate throttles raw
+  request rate regardless of outcome.
+- The claim's minimum-reel-time floor uses the exact drain rate the server told
+  the client in the bite payload, not an assumed constant.
 - Successful catches are rate-limited (`Config.RateLimit` per minute).
+- `/zfish_xp` and `/zfish_roll` require the same admin ACE as `/zfishreload` —
+  no player can self-grant XP or sample rolls.
+- Anchoring a boat requires the player be within 15m of it, with the netId
+  type-checked — a forged event can't freeze an arbitrary vehicle from across
+  the map.
 - Weather/time input is low-trust by design — it only shifts spawn *bonuses*.
+
+Full session-state and callback contract: see `docs/ARCHITECTURE.md` §§2–3.
 
 ## v1 limitations (remaining)
 
