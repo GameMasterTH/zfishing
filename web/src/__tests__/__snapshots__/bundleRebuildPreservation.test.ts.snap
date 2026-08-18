@@ -27,7 +27,7 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "server/progression.lua": "1d092840245e75760f704fef4e1c08f46528f4d768fcf6a441d48b3ce2f84693",
   "server/rewards.lua": "3f2fbdcc7cbc00136d583d98943d7f28cff042079a8d19af92afb91ea5acfb3e",
   "server/rig.lua": "883b0950ff6a10811ccc729b9f1c6bc7950f4636a39efad21872d753c256375d",
-  "server/session.lua": "67c771e7f6bc779bbb0fc212d9138fa2b72cf0d1cc1d6a06dcef2da6c7f935f7",
+  "server/session.lua": "fc3c5d6416fb99a08c3d6a7ae9ca963ca9211ba1a3fbaf63bf129747b1b853fb",
   "server/store.lua": "c2994354965a6d05909ecc42c99006f4da4d949c0c574ab05acf00cae11b8d0c",
   "server/usable.lua": "9ceec575f5ca9830847272f81f3cd727668eda1acc4d2c3a293ff43311ae96d6",
   "server/validate.lua": "c06b7084fa62f001764033cccecbc613c19136f60e6a0ea9f36240f99bd2d184",

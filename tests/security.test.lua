@@ -525,7 +525,13 @@ local function loadSession(opts)
             tensionDiff = 1.0, fishEnergy = 50, xp = 10, price = 100 }
     end }
     local rewardCalls = { give = 0 }
-    Rewards = { GiveCatch = function() rewardCalls.give = rewardCalls.give + 1; return opts.giveCatch ~= false end }
+    Rewards = { GiveCatch = function()
+        rewardCalls.give = rewardCalls.give + 1
+        -- Simulates the real GiveCatch yielding on AddItem / Progression.Save /
+        -- MySQL.insert. The test drives the coroutine by hand to open the window.
+        if opts.yieldOnGive then coroutine.yield() end
+        return opts.giveCatch ~= false
+    end }
     dofile('shared/util.lua')
     dofile('shared/rig_rules.lua')
     dofile('server/rig.lua')
@@ -660,6 +666,39 @@ test('F6 each cast mints a distinct session token', function()
     CB['zfishing:cancel'](5, first.sessionId)
     local second = CB['zfishing:cast'](5, 0.5)
     truthy(first.sessionId ~= second.sessionId, 'a new cast must not reuse the previous token')
+end)
+
+test('F7 a second claim during the reward yield is refused -- no double payout', function()
+    local _, rewardCalls = loadSession({ requireZone = false, yieldOnGive = true })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    -- first claim: run it until it parks inside GiveCatch
+    local first = coroutine.create(function()
+        return CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    truthy(coroutine.resume(first), 'the first claim must reach the reward call')
+    equal(coroutine.status(first), 'suspended', 'the first claim is parked mid-reward')
+    equal(rewardCalls.give, 1)
+
+    -- second claim arrives while the first is still settling
+    local second = coroutine.create(function()
+        return CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    local ok2, res2 = coroutine.resume(second)
+    truthy(ok2)
+    equal(coroutine.status(second), 'dead', 'the replay must not reach the reward call')
+    falsy(res2.ok, 'the replayed claim is refused')
+    equal(rewardCalls.give, 1, 'the reward was handed out exactly once')
+
+    -- let the first finish
+    local ok3, res3 = coroutine.resume(first)
+    truthy(ok3)
+    truthy(res3.ok, 'the original claim still settles successfully')
+    equal(rewardCalls.give, 1)
 end)
 
 test('D4 assembly cast trusts the server-read slot, not a client-named one', function()

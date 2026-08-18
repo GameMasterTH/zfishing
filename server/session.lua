@@ -227,8 +227,19 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
         reset(src); return { ok = true, fish = nil }
     end
 
+    -- Lock the session BEFORE the first yield. GiveCatch does AddItem +
+    -- Progression.Save + MySQL.insert, and across any of those yields a second
+    -- claim would otherwise still find state == 'reeling' and be paid again.
+    s.state = 'settling'
+
     local given = Rewards.GiveCatch(src, fish, s.zone)
-    rate[src].count = rate[src].count + 1
+
+    -- the player may have dropped during the settle; playerDropped clears rate[src]
+    if rate[src] then rate[src].count = rate[src].count + 1 end
+
+    print(('[zfishing] claim settled session=%s src=%s species=%s reward=%s')
+        :format(s.id, src, fish.species, tostring(given)))
+
     reset(src)
     if not given then return { ok = false, reason = 'inv_full' } end
     return { ok = true, fish = { label = fish.label, weight = fish.weight, quality = fish.quality, species = fish.species } }
