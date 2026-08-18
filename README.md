@@ -327,8 +327,10 @@ grants 50 XP.
 
 ## v1 limitations (remaining)
 
-- **Keep/Release both close the card** — the fish is granted at claim time;
-  a true release (removing the item) is a follow-up.
+- **No true release yet** — the catch card has a single **Continue** button;
+  the fish is granted server-side at claim time, before the card renders. A
+  true release — removing the granted item in exchange for something (XP,
+  conservation reputation) — is deferred to Phase 2.
 - **Simple-fishing mode has no per-catch metadata** — when the resolver pins
   `simple-fishing` (e.g. plain ESX native), fish are plain items sold at
   species-average weight / 3★ quality and rod assembly is explicitly disabled
