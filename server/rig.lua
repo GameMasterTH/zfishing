@@ -150,7 +150,11 @@ local function makePartMeta(partType, itemName, remainingDur)
 end
 
 lib.callback.register('zfishing:rig:get', function(src, slot)
-    if not gate.allow(src, 'get') then return { ok = false, err = 'too_many_requests' } end
+    -- unlike attach/detach, this callback's only failure shape is bare nil (no
+    -- rod -> nil below) and the client only checks `if not view`; a truthy
+    -- { ok = false, err = ... } table would be treated as a real view and
+    -- pushed to the NUI, so the gate follows the existing nil contract here.
+    if not gate.allow(src, 'get') then return nil end
     local s, meta = Rig.slotMeta(src, slot)
     if not s then return nil end
     -- carried spare parts, grouped by part type, so the client can offer them

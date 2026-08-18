@@ -493,6 +493,17 @@ test('D3 rig:detach aborts on a full inventory and leaves the part fitted (no du
     truthy(view.parts.reel, 'the part must stay fitted when it could not be returned')
 end)
 
+test('D3b rig:get gate rejection returns nil, not a truthy err table', function()
+    -- rig:get's only failure shape is bare nil (no rod slot -> nil); the client
+    -- only checks `if not view`, so a truthy { ok = false, err = ... } table
+    -- from the gate would be pushed to the NUI as if it were a real view.
+    loadRig({ mode = 'enhanced', inv = { [5] = {
+        [3] = { name = 'fishing_rod_common', count = 1, metadata = { parts = {}, dur = { rod = 20 } } },
+    } } })
+    for _ = 1, 10 do CB['zfishing:rig:get'](5, 3) end
+    equal(CB['zfishing:rig:get'](5, 3), nil, 'a gate-rejected rig:get must stay nil, matching the no-rod contract')
+end)
+
 -- =============================================================== session loader
 -- Loads the real session state machine (+ rig, for the assembly path) with the
 -- gameplay dependencies mocked. Used by groups D4, E and F.
