@@ -46,7 +46,7 @@ local function resolve()
         :format(mode, details.framework.id, details.inventory.id))
     if mode == MODE_SIMPLE then
         print('[zfishing] simple-fishing mode: rod assembly and per-instance metadata are disabled; '
-            .. '/fishrig explains this and fish sell at species-average weight')
+            .. 'fish sell at species-average weight')
     end
 end
 
