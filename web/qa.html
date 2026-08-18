@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>zfishing QA harness</title>
+    <!-- CLASSIC script: runs BEFORE the deferred module below, so the fetch stub
+         is installed before main.tsx calls loadLocale(). -->
+    <script>
+      // Fixtures are fetched at runtime from the real locales/*.json (served by
+      // the zfishing-serve-locales dev middleware in vite.config.ts). Embedding
+      // a copy here would go stale silently the next time a string changes.
+      //
+      // No race: App.tsx does `await fetchNui('getLocale')`, so handing back the
+      // real fetch promise is all that is needed.
+      var origFetch = window.fetch.bind(window);
+      window.fetch = function (u, o) {
+        var s = String(u);
+        if (s.indexOf('/getLocale') !== -1) {
+          return origFetch('/locales/th.json');
+        }
+        if (s.indexOf('https://zfishing/') === 0) {
+          console.log('[qa] nui callback:', s.replace('https://zfishing/', ''));
+          return Promise.resolve(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+        }
+        return origFetch(u, o);
+      };
+      var P = function (m) { window.postMessage(m, '*'); };
+      var RIG = { rod: 'rod_epic', rodLabel: 'Master Rod', parts: {}, carried: { reel: [], line: [], hook: [], float: [] } };
+      var CAT = [{ partType: 'reel', name: 'reel_carbon', label: 'Carbon Reel' }];
+      var castTimer = null;
+
+      window.qa = {
+        cast: function () {
+          clearInterval(castTimer);
+          var p = 0;
+          P({ action: 'cast', state: 'start', power: 0 });
+          castTimer = setInterval(function () {
+            p += 0.02;
+            if (p >= 1) { p = 1; clearInterval(castTimer); P({ action: 'cast', state: 'release', power: 1 }); return; }
+            P({ action: 'cast', state: 'charge', power: p });
+          }, 40);
+        },
+        wait: function () { P({ action: 'waiting', phase: 'waiting', rod: 'Master Rod', bait: 'Topwater', distance: 17.5 }); },
+        bite: function () { P({ action: 'waiting', phase: 'bite', rod: 'Master Rod', bait: 'Topwater', distance: 17.5 }); },
+        reel: function () {
+          P({ action: 'reel', behavior: 'steady_light', tensionDiff: 1, fishEnergy: 100, greenZone: 0.1,
+              snapFactor: 1, drainRate: 1, fishWeight: 9.6, startedAt: Date.now() });
+        },
+        caught: function () { P({ action: 'caught', label: 'Salmon', weight: 9.6, quality: 3 }); },
+        hint: function () { P({ action: 'prompt', titleKey: 'equip_title', subtitleKey: 'equip_hint' }); },
+        rig: function () { P({ action: 'rigOpen', view: RIG, catalog: CAT }); },
+        hide: function () { clearInterval(castTimer); P({ action: 'hide' }); P({ action: 'promptHide' }); },
+        bg: function (which) {
+          document.body.style.background =
+            which === 'water' ? 'linear-gradient(160deg,#7fc7e0,#bfe2ef 55%,#eaf4f9)'
+            : which === 'sky' ? 'linear-gradient(180deg,#cfe6f5,#f2f7fa)'
+            : '#0a0e13';
+        }
+      };
+
+      // hold SPACE while reeling
+      window.addEventListener('keydown', function (e) {
+        if (e.code === 'Space') { e.preventDefault(); P({ action: 'reelInput', holding: true }); }
+      });
+      window.addEventListener('keyup', function (e) {
+        if (e.code === 'Space') { e.preventDefault(); P({ action: 'reelInput', holding: false }); }
+      });
+    </script>
+    <style>
+      body { background: #0a0e13; }
+      #qa-bar {
+        position: fixed; top: 0; left: 0; z-index: 9999;
+        display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
+        background: rgba(0,0,0,0.75); font: 12px/1 system-ui, sans-serif;
+      }
+      #qa-bar button {
+        padding: 6px 10px; cursor: pointer; border: 1px solid #555;
+        background: #1b232c; color: #e8edf2; font: inherit; border-radius: 0;
+      }
+      #qa-bar button:hover { background: #2a343f; }
+      #qa-bar .sep { width: 1px; background: #444; margin: 0 4px; }
+      #qa-note { color: #9fb3c4; align-self: center; margin-left: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="qa-bar">
+      <button onclick="qa.cast()">cast (charge→release)</button>
+      <button onclick="qa.wait()">wait</button>
+      <button onclick="qa.bite()">bite</button>
+      <button onclick="qa.reel()">reel</button>
+      <button onclick="qa.caught()">caught</button>
+      <button onclick="qa.hint()">idle prompt</button>
+      <button onclick="qa.rig()">rig (G menu)</button>
+      <button onclick="qa.hide()">hide</button>
+      <span class="sep"></span>
+      <button onclick="qa.bg('dark')">bg dark</button>
+      <button onclick="qa.bg('water')">bg water</button>
+      <button onclick="qa.bg('sky')">bg sky</button>
+      <span id="qa-note">reel: hold SPACE</span>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
