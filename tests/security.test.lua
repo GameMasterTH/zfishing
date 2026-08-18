@@ -141,6 +141,7 @@ end
 local function loadValidate()
     installHost()
     Config = baseConfig()
+    dofile('server/config_schema.lua')
     dofile('server/validate.lua')
 end
 
@@ -413,6 +414,7 @@ local function loadRig(state)
     Config = baseConfig()
     local Z, inv, calls = makeZfishing(state)
     Zfishing = Z
+    dofile('shared/rig_rules.lua')
     dofile('server/rig.lua')
     return inv, calls
 end
@@ -441,17 +443,24 @@ test('D1b Rig.slotMeta returns nil in simple mode (assembly disabled)', function
 end)
 
 test('D2 rig:attach validates part, ownership, occupancy and item', function()
-    loadRig({ mode = 'enhanced', inv = { [5] = {
+    local inv = { [5] = {
         [3] = { name = 'fishing_rod_common', count = 1, metadata = { parts = {}, dur = { rod = 20 } } },
         [4] = { name = 'reel_basic', count = 1 },
-    } } })
+    } }
+    loadRig({ mode = 'enhanced', inv = inv })
     equal(CB['zfishing:rig:attach'](5, 3, 'rocket', 'x').err, 'bad_part')
     equal(CB['zfishing:rig:attach'](5, 99, 'reel', 'reel_basic').err, 'no_rod')
     equal(CB['zfishing:rig:attach'](5, 3, 'reel', 'reel_nonexistent').err, 'bad_item')
-    -- happy path
+    -- happy path: consumes the carried reel
     truthy(CB['zfishing:rig:attach'](5, 3, 'reel', 'reel_basic').ok)
-    -- now occupied
-    equal(CB['zfishing:rig:attach'](5, 3, 'reel', 'reel_basic').err, 'occupied')
+    -- the only carried reel is now fitted, so there is nothing left to attach
+    equal(CB['zfishing:rig:attach'](5, 3, 'reel', 'reel_basic').err, 'not_carried')
+    -- attaching to a FILLED socket swaps: the fitted part returns to the
+    -- inventory and the new one goes on. There is no 'occupied' refusal by
+    -- design -- see server/rig.lua:196-204.
+    inv[5][4] = { name = 'reel_basic', count = 1 }
+    truthy(CB['zfishing:rig:attach'](5, 3, 'reel', 'reel_basic').ok,
+        'a filled socket swaps rather than refusing')
 end)
 
 test('D2b rig:attach reports not_carried when the player lacks the part', function()
@@ -518,6 +527,7 @@ local function loadSession(opts)
     local rewardCalls = { give = 0 }
     Rewards = { GiveCatch = function() rewardCalls.give = rewardCalls.give + 1; return opts.giveCatch ~= false end }
     dofile('shared/util.lua')
+    dofile('shared/rig_rules.lua')
     dofile('server/rig.lua')
     dofile('server/session.lua')
     return inv, rewardCalls
@@ -636,12 +646,14 @@ local function loadAllServerModulesAtBoot()
         GetIdentifier = function() return { ok = true, effects = { details = { identifier = 'license:test' } } } end,
     } }
     dofile('shared/util.lua')
+    dofile('server/config_schema.lua')
     dofile('server/validate.lua')
     dofile('server/lib.lua')
     dofile('server/store.lua')
     dofile('server/generator.lua')
     dofile('server/progression.lua')
     dofile('server/rewards.lua')
+    dofile('shared/rig_rules.lua')
     dofile('server/rig.lua')
     dofile('server/session.lua')
     dofile('server/weather.lua')
