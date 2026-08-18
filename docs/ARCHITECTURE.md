@@ -157,7 +157,12 @@ state-change moments use CSS keyframes on `transform`/`opacity`.
 ## 2. The session state machine
 
 The server owns the authoritative state. `sessions[src]` in `server/session.lua` is
-a single table per player, or `nil` when idle.
+a single table per player, or `nil` when idle. Every session carries an `id` — a
+per-cast token minted by `newSessionId()` (defined just below `reset()`, not
+above it) — that every subsequent callback must present via
+`sessionFor(src, sessionId)`, which only resolves the caller's session when the
+token matches. The token is correlation and stale-request protection, not a
+secret: a modified client can always read its own. See §3.1.
 
 ```
                      nil
@@ -171,27 +176,52 @@ a single table per player, or `nil` when idle.
                       │                          'zfishing:bite'
                       ▼                                     │
                  'hooking'  ◄────────────────────────────────┘
-                      │  zfishing:hook  before s.hookDeadline
+                      │  zfishing:hook(sessionId)  before s.hookDeadline
                       ▼
                  'reeling'
-                      │  zfishing:claim(reelDurationMs, success, reason)
+                      │  zfishing:claim(sessionId, reelDurationMs, success, reason)
+                      ├─ success == false ─────────────────────────► nil
+                      │
+                      │ success == true
+                      ▼
+                 'settling'   (locked BEFORE Rewards.GiveCatch is called)
+                      │
                       ▼
                      nil   (+ item granted, XP added, catch logged, rate++)
 ```
+
+**`settling` exists to close a replay window.** `Rewards.GiveCatch` does
+`AddItem` → `Progression.Save` → `MySQL.insert`, each a yield point; the claim
+callback sets `s.state = 'settling'` *before* calling it. `hook` requires
+`s.state == 'hooking'` and `claim` requires `s.state == 'reeling'`, so a claim
+replayed while the reward is still settling fails that check and is refused
+rather than paid twice. `cancel` is the one callback that does **not** check
+`s.state` — it matches only on `sessionId` and always resets — so a `cancel`
+racing in during the settle window can still null out `sessions[src]` early.
+That is harmless: `Rewards.GiveCatch(src, fish, zone)` was already called with
+`fish` and `zone` captured as locals, not re-read from the session table, so an
+early reset cannot touch a reward already in flight. Nothing moves a session
+out of `settling` into another live state — from there it only ever proceeds
+to `nil`.
 
 **Every path back to `nil`:**
 
 | Trigger | Where |
 |---|---|
-| Successful claim | `zfishing:claim` success branch |
+| Successful claim (through `settling`) | `zfishing:claim` success branch |
 | Failed claim (escape/snap) — still `ok = true`, `fish = nil` | `zfishing:claim` |
-| Claim too fast (`elapsed < minMs * 0.6`) → `reason = 'too_fast'` | `zfishing:claim` |
+| Claim too fast (`elapsed < minMs * 0.9`) → `reason = 'too_fast'` | `zfishing:claim` |
 | Claim too late (`elapsed > Config.Timings.reelTimeout + 5000`) → `reason = 'timeout'` | `zfishing:claim` |
 | Hook pressed after `hookDeadline` → `reason = 'too_slow'` | `zfishing:hook` |
 | Hook never pressed — watchdog `SetTimeout(hookWindow + hookLatency + 2000)` | `zfishing:cast` |
-| Player presses X → `zfishing:cancel` | client `zfishing_cancel` command |
+| Player presses X → `zfishing:cancel(sessionId)` | client `zfishing_cancel` command |
 | Rod broke during the cast's wear pass → `reason = 'rod_broke'` | `zfishing:cast` |
 | Player disconnected | `playerDropped` handler |
+
+A rejected `hook`/`claim`/`cancel` call carrying an invalid or stale `sessionId`
+(`reason = 'invalid_session'`) or one that trips the per-action flood gate
+(`reason = 'too_many_requests'`) does **not** appear in the table above — it
+leaves any existing session untouched rather than resetting it.
 
 The bite timer and the hook watchdog both re-check `s.fish == fish` (identity, not
 equality) before acting, so a stale timer from a previous session can never mutate
@@ -205,6 +235,9 @@ a new one.
 - `ZClient.reeling` — the NUI minigame is live and input is being streamed
 - `ZClient.rodSlot` — the inventory slot of the rod being used; sent to the server
   so it can read the components fitted on *that specific* rod
+- `ZClient.sessionId` — the per-cast token returned by `zfishing:cast`; sent with
+  every `hook`/`claim`/`cancel` call after it so the server can tell this session
+  apart from a stale one
 - `ZClient.hud` — `{ rod, bait, distance }` cached for re-sending to the NUI
 
 There is exactly **one** client teardown path: `cleanup()` in `client/main.lua`,
@@ -246,10 +279,12 @@ ped, and hides any TextUI. Any new exit condition must route through it.
 13. The NUI runs `MinigameEngine` in a RAF loop. It streams `reelEnergy` back
     (throttled: at most every 150ms, and only on a ≥1% change) so the bobber moves
     smoothly, and on finish posts `reelResult { success, reason, durationMs }`.
-14. Client calls `zfishing:claim`. Server validates timing, grants the item, adds
-    XP, logs the catch, rolls rare loot, increments the rate counter, resets.
-15. On success the client shows the catch card and takes NUI focus. `keep` and
-    `release` both close the card and run `cleanup()` — see §9.
+14. Client calls `zfishing:claim(sessionId, ...)`. Server locks the session into
+    `settling`, validates timing, grants the item, adds XP, logs the catch, rolls
+    rare loot, increments the rate counter, resets.
+15. On success the client shows the catch card and takes NUI focus. The card's
+    single "Continue" button fires the `keep` NUI callback, which closes the card
+    and runs `cleanup()` — see §9.
 
 ---
 
@@ -259,12 +294,17 @@ Everything below is the complete external surface. Names are exact.
 
 ### 3.1 Server callbacks (`lib.callback.register`) — client awaits these
 
+Every callback below except `cast` and `sellAll` takes a `sessionId` (or, for the
+rig callbacks, is independently gated) — see the per-action flood gate note after
+this list, and §2 for what the token protects against.
+
 **`zfishing:cast(power: number 0..1, rodSlot: number) → table`**
 
 Validation order, each returning `{ ok = false, reason = <string> }`:
 
 | Check | reason |
 |---|---|
+| per-action flood gate (`cast`: max 3 per 2000ms) | `too_many_requests` |
 | `Zfishing.Blocked()` — runtime profile unavailable | `unavailable` |
 | session already exists | `busy` |
 | rate limit exceeded (`Config.RateLimit` successful catches per fixed 60s window) | `rate` |
@@ -277,30 +317,53 @@ Validation order, each returning `{ ok = false, reason = <string> }`:
 | `Generator.Roll` produced no candidates | `empty_water` |
 | rod hit 0 durability during the wear pass and `RodCanBreak` is on | `rod_broke` |
 
-Success returns `{ ok = true, rod = <rod label>, bait = <bait label> }`.
+Success returns `{ ok = true, sessionId = <string>, rod = <rod label>, bait = <bait
+label> }`. `sessionId` is a per-cast token, minted by `newSessionId()` in
+`server/session.lua` — a monotonic sequence plus a random half. It is
+correlation and stale-request protection, **not a secret**: a modified client
+can always read its own. The client must send it back on every `hook`/`claim`/
+`cancel` call for this session; a call with a missing, malformed, or mismatched
+token gets `reason = 'invalid_session'` without touching any real session (see
+§2).
 
 The client turns any `reason` into a locale key by prefixing `error_`, e.g.
 `error_no_bait`.
 
-**`zfishing:hook() → { ok, reason? }`** — `reason = 'too_slow'` past the deadline.
+**`zfishing:hook(sessionId: string) → { ok, reason? }`**
 
-**`zfishing:claim(reelDurationMs: number, success: boolean, reason?: string) → table`**
+`reason = 'invalid_session'` (bad token), `'too_many_requests'` (flood gate: max
+5 per 2000ms), or `'too_slow'` (past `s.hookDeadline`).
+
+**`zfishing:claim(sessionId: string, reelDurationMs: number, success: boolean, reason?: string) → table`**
 
 - `{ ok = true, fish = { label, weight, quality, species } }` — caught
 - `{ ok = true, fish = nil }` — legitimate escape or snap
-- `{ ok = false, reason = 'too_fast' | 'timeout' | 'inv_full' }`
+- `{ ok = false, reason = 'too_fast' | 'timeout' | 'inv_full' | 'invalid_session' | 'too_many_requests' }`
 
-`reason == 'snap'` on a failed claim destroys the fitted line component
-(`Rig.breakLine`) and fires `zfishing:rig:notify` with `line_broke`.
+`too_many_requests` is the flood gate (max 3 per 3000ms), checked before the
+session lookup. `reason == 'snap'` on a failed claim destroys the fitted line
+component (`Rig.breakLine`) and fires `zfishing:rig:notify` with `line_broke`.
+A successful claim locks the session in `settling` before the reward is granted
+— see §2.
 
 Note: `reelDurationMs` is *sent by the client but not used* — the server measures
 elapsed time itself from `s.reelStart`.
 
-**`zfishing:cancel() → { ok = true }`** — unconditional session reset.
+**`zfishing:cancel(sessionId: string) → { ok, reason? }`** — `reason =
+'invalid_session'` on a bad token; otherwise an unconditional session reset.
+Deliberately **not** behind the flood gate — cancel is the "bail out" escape
+hatch (see §3.5 / §9) and must never be throttled.
 
 **`zfishing:sellAll() → { ok: boolean, total: number }`** — see §4.4.
 
 **`zfishing:rig:get(slot: number) → RigView | nil`**
+
+Returns bare `nil` — not an error table — both when the slot holds no rod the
+player owns and when the per-action flood gate rejects the request (`get`: max
+10 per 5000ms). The client's contract is `if not view`, so a truthy
+`{ ok = false, ... }` would be mistaken for a real view and pushed to the NUI;
+the gate deliberately matches the existing nil contract instead of introducing
+a new shape.
 
 ```lua
 {
@@ -324,15 +387,20 @@ the same inventory `slot`.
 
 **`zfishing:rig:attach(slot, partType, itemName, partSlot) → { ok, err? }`**
 `partType` ∈ `reel | line | hook | float`.
-`err` ∈ `bad_part | no_rod | bad_item | not_carried | inv_full | remove_failed | meta_failed`.
-If the socket is already occupied the fitted part is returned to the inventory
-first; if that fails, the whole operation aborts with `inv_full`. On a metadata
-write failure the removed part is added back — a part is never destroyed silently.
+`err` ∈ `too_many_requests | bad_part | no_rod | bad_item | not_carried | inv_full | remove_failed | meta_failed`.
+The flood gate (max 10 per 5000ms) is checked first and, unlike `rig:get`,
+returns the normal `{ ok = false, err = ... }` table rather than bare `nil` —
+`attach`/`detach` already have an error-table contract, so there is no
+existing-shape reason to special-case it. If the socket is already occupied the
+fitted part is returned to the inventory first; if that fails, the whole
+operation aborts with `inv_full`. On a metadata write failure the removed part
+is added back — a part is never destroyed silently.
 
 **`zfishing:rig:detach(slot, partType) → { ok, err? }`**
-`err` ∈ `bad_part | no_rod | empty | inv_full`. The part is added back to the
-inventory **before** it is cleared from the rod, so a full inventory leaves it
-fitted rather than deleting it.
+`err` ∈ `too_many_requests | bad_part | no_rod | empty | inv_full` (same gate:
+max 10 per 5000ms). The part is added back to the inventory **before** it is
+cleared from the rod, so a full inventory leaves it fitted rather than deleting
+it.
 
 **Admin callbacks** — all gated by `exports.zcore_lib:IsAdmin(src, 'zfishing.admin')`
 and returning `{ ok = false, err = 'denied' }` when refused:
@@ -355,7 +423,7 @@ and returning `{ ok = false, err = 'denied' }` when refused:
 
 | Event | Payload |
 |---|---|
-| `zfishing:bite` | `{ behavior, tensionDiff, fishEnergy, hookWindow, greenZone, snapFactor, drainRate, fishWeight }` |
+| `zfishing:bite` | `{ behavior, tensionDiff, fishEnergy, hookWindow, greenZone, snapFactor, drainRate, baseDrain, reelTimeout, fishWeight }` |
 | `zfishing:client:useRod` | the inventory item table (has `.slot`) |
 | `zfishing:rig:notify` | `kind ∈ 'part_broke' \| 'rod_broke' \| 'line_broke'`, plus `label` for `part_broke` |
 | `zfishing:store:sync` | `{ zones[], castMaxDistance, defaultWater, requireZone }` |
@@ -367,6 +435,16 @@ The `zfishing:bite` payload is deliberately *abstracted*. It never contains
 `species`, `label`, `price`, `xp`, `rarity`, or `quality`. `fishWeight` is sent
 because the NUI needs it for fight dynamics — it is the one concrete value that
 leaks, and it leaks after the roll is already locked in.
+
+`drainRate` and `baseDrain` are not the same kind of number, and §8 invariant 6
+already warns about the naming half of this — here is the units half: `baseDrain`
+is `Config.Minigame.baseDrain`, a single server-tuned constant (energy drained
+per second while in the green zone, same for every fight). `drainRate` is
+per-session — `s.reelDrain`, the fitted reel's `drainRate` stat (how fast *this*
+fish tires against *this* gear). The engine multiplies them:
+`energy -= baseDrain * drainRate * dt` (§7.3). Confusing the two — e.g. trying to
+retune fight difficulty by editing a reel's `drainRate` when the intent was the
+global pace, or vice versa — changes the wrong thing.
 
 **Client → server**
 
@@ -389,7 +467,7 @@ Dispatched by a single `switch (msg.action)` in `App.tsx`.
 |---|---|---|
 | `cast` | `state ∈ 'start'\|'charge'\|'release'`, `power` | shows `CastBar` |
 | `waiting` | `phase ∈ 'waiting'\|'bite'`, `rod`, `bait`, `distance` | shows `FishingInfoCard` + `WaitingHud` |
-| `reel` | `behavior, tensionDiff, fishEnergy, greenZone, snapFactor, drainRate, fishWeight, startedAt` | mounts `TensionMinigame`; `startedAt` is the React `key`, so each fight gets a fresh engine |
+| `reel` | `behavior, tensionDiff, fishEnergy, greenZone, snapFactor, drainRate, baseDrain, reelTimeout, fishWeight, startedAt` | mounts `TensionMinigame`; `startedAt` is the React `key`, so each fight gets a fresh engine |
 | `reelInput` | `holding: boolean` | updates hold state without remounting |
 | `caught` | `label, weight, quality` | shows `CatchCard` |
 | `prompt` | `titleKey, subtitleKey` | shows `PromptHud` (locale keys, not text) |
@@ -406,7 +484,7 @@ Dispatched by a single `switch (msg.action)` in `App.tsx`.
 | `getLocale` | — | `client/main.lua` — returns the merged `en` + active-language dict |
 | `reelEnergy` | `{ pct: 0..1 }` | `client/minigame.lua` — drives bobber distance |
 | `reelResult` | `{ success, reason, durationMs }` | `client/minigame.lua` — triggers the claim |
-| `keep` / `release` | — | `client/minigame.lua` — both close the card identically |
+| `keep` | — | `client/minigame.lua` — closes the catch card. The NUI button is labeled "Continue" (Task 7 removed the Keep/Release choice); `keep` is the only callback the card fires |
 | `rigAction` | `{ kind: 'attach'\|'detach', partType, itemName, slot }` | `client/rig.lua` |
 | `rigClose` | — | `client/rig.lua` |
 | `adminClose` | — | `client/admin.lua` |
@@ -424,8 +502,8 @@ that check.
 | `/zfishadmin` | server | admin |
 | `/zfishzone` | server | admin |
 | `/zfishreload` | server | admin — re-pull config from DB and broadcast |
-| `/zfish_roll [water]` | server | any player — samples one roll (QA) |
-| `/zfish_xp` | server | any player — grants 50 XP (QA) |
+| `/zfish_roll [water]` | server | admin — samples one roll (QA) |
+| `/zfish_xp` | server | admin — grants 50 XP (QA) |
 
 | Keybind | Default | Registered as | Condition |
 |---|---|---|---|
@@ -576,8 +654,8 @@ or call `zfishing:admin:resetDomain`).
 must never create or alter schema. The migrations under `migrations/mysql/` are
 applied by an external provisioner (the "Site Agent") *before* the resource starts.
 `Seed()` and `Load()` only read and write business data into already-provisioned
-tables. (`README.md` says tables are "created automatically on first start" — that
-line is stale; see §10.)
+tables. (`README.md` used to say tables are "created automatically on first
+start" — that was stale and has been corrected; see its **Database** section.)
 
 **Equipment field backfill.** `Store.Load` keeps a snapshot of the static
 `Config.Equipment` taken *before* the DB overwrite, and backfills any key present in
@@ -754,7 +832,7 @@ center oscillates around 55, eased toward the target at lerpRate,
 tension += ((holding ? 40 : -50) + pull * tensionDiff) * dt      // clamped 0..100
 
 // energy
-in green:      energy -= 12 * drainRate * dt
+in green:      energy -= baseDrain * drainRate * dt
 below green:   energy += 3 * dt                                  // capped at fishEnergy
 above green:   energy unchanged
 
@@ -762,6 +840,12 @@ above green:   energy unchanged
 tension > 92:  snapMs += dt*1000     else snapMs -= dt*500 (floor 0)
 snapBudget  =  900 * snapFactor
 ```
+
+`baseDrain` and `reelTimeout` are not hard-coded in the engine — both are
+injected from the `zfishing:bite` payload's `EngineConfig`
+(`baseDrain = Config.Minigame.baseDrain`, `reelTimeout = Config.Timings.reelTimeout`,
+both read server-side and shipped to the client at bite time). See §8 invariants
+1 and 2 for why this single-sources them against the server's own claim-time math.
 
 `pull` by behavior: `steady_light` 12, `steady_heavy` 22, `run_stop` 30 for the
 first 3s of each 5s cycle then 5, `erratic` a re-rolled `5..35` every 700–1500ms.
@@ -775,7 +859,7 @@ Finish conditions, checked in this order:
 | fish was damaged (`energy` dropped below 98%) and has recovered to full | `escape` |
 | `energy <= 0` | `success` |
 | `snapMs >= snapBudget` | `snap` |
-| `elapsedMs >= 28000` | `timeout` |
+| `elapsedMs >= reelTimeout` | `timeout` |
 
 ### 7.4 Economy and progression
 
@@ -798,21 +882,35 @@ the first entry that passes its own roll wins (the function returns on the first
 These are couplings that are not enforced by any type system. Breaking one produces
 a silent failure, not a crash.
 
-**1. The drain constant `12` is duplicated.**
-`web/src/engine/minigameEngine.ts` drains `12 * drainRate * dt` while in the green
-zone. `server/session.lua`'s claim validation independently computes
-`minMs = (fish.fishEnergy / (12 * drain)) * 1000` and rejects any success claim
-faster than `minMs * 0.6` as `too_fast`. **Changing the engine's drain rate without
-changing the server's constant makes the server silently reject legitimate
-catches.**
+**1. (Resolved) The drain constant used to be duplicated.**
+`web/src/engine/minigameEngine.ts` used to drain a hard-coded `12 * drainRate *
+dt` in the green zone while `server/session.lua`'s claim validation
+independently computed `minMs` from its own hard-coded `12`, with no link
+between them — changing one without the other made the server silently reject
+legitimate catches. The constant is now `Config.Minigame.baseDrain` (default
+`12.0`, `config/main.lua`), read server-side and shipped to the client in the
+`zfishing:bite` payload. Both sides now consume the *same* value: the engine as
+`energy -= baseDrain * drainRate * dt` (§7.3), the server's claim floor as
+`minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000` with a
+`0.9` slack (`server/session.lua`). Retuning the drain rate is now a one-line
+change in `config/main.lua` — no client rebuild, and nothing to keep in sync by
+hand.
 
-**2. The reel timeout has two different limits.**
-The engine finishes with `timeout` at `elapsedMs >= 28000` (a hard-coded constant).
-The server rejects a claim whose elapsed time exceeds
-`Config.Timings.reelTimeout + 5000` — 35,000ms at the default `reelTimeout` of
-30,000. `reelTimeout` is admin-editable down to 3,000ms via the panel. **Setting it
-below 23,000 puts the server's cutoff under the engine's own timeout**, so a fight
-that legitimately runs long is rejected before the NUI ever gives up.
+**2. (Resolved) The reel timeout used to have two different limits.**
+The engine used to finish with `timeout` at a hard-coded `elapsedMs >= 28000`
+while the server independently rejected a claim past
+`Config.Timings.reelTimeout + 5000` — retuning `reelTimeout` in the admin panel
+below 23,000ms put the server's cutoff *under* the engine's own hard-coded
+timeout, rejecting a fight that legitimately ran long before the NUI ever gave
+up. The engine now reads `reelTimeout` from the same `zfishing:bite` payload the
+server derives its own cutoff from (`elapsedMs >= this.config.reelTimeout` in
+`minigameEngine.ts`) — there is exactly **one** authoritative timeout,
+`Config.Timings.reelTimeout`. The server's `+ 5000` (`server/session.lua:235`,
+at the time of writing) **stays**, and is now purely latency grace layered on
+top of that one timeout — the round trip for the NUI's `reelResult` to reach
+the `claim` callback — not a second, competing limit. Do not "fix" it away to
+match `reelTimeout` exactly; a fight that legitimately finishes right at the
+wire still needs that grace, or network latency alone would fail it.
 
 **3. The hook window is asymmetric on purpose.**
 Server: `hookDeadline = now + fish.hookWindow + Config.Timings.hookLatency` (300ms
@@ -864,9 +962,6 @@ those elements makes the displayed value visibly lag the engine.
 
 ## 9. Behavioral notes that look like bugs but are not
 
-- **Keep and Release do the same thing.** The fish is granted at claim time, before
-  the card is shown. Both `keep` and `release` NUI callbacks just close the card. A
-  true release (removing the granted item) is unimplemented.
 - **`reelDurationMs` is sent but ignored.** The server times the fight itself. The
   client's number is not trusted and not used.
 - **Bait is consumed at the bite, not at the catch.** Hit or miss, once the fish
@@ -883,6 +978,19 @@ those elements makes the displayed value visibly lag the engine.
   from the same boat both hold a reference; the anchor releases only when the last
   one leaves. The sync event goes to `-1` (all clients) because boat state must
   agree across the session.
+- **Boat anchoring is proximity-checked on `Add` but deliberately not on
+  `Remove`.** `BoatAnchor.Add` (`server/boat_anchor.lua`) requires the caller
+  within 15m of the target boat before granting a reference; `BoatAnchor.Remove`
+  does not re-check distance, and that is not a lapsed guard. `players[src]`
+  membership in a boat's anchor record is a capability only obtainable by
+  already having passed `Add`'s proximity check, so a remote `Remove` call can
+  at most release the one reference the caller legitimately acquired — there is
+  no capability to gate. Proximity-checking `Remove` too would instead strand a
+  boat frozen forever the moment a player dies while fishing, respawns at a
+  hospital kilometres away, and can never get back into range to release it —
+  which would also block a co-angler's legitimate release, since the anchor is
+  refcounted. Do not "tighten" `Remove` into a proximity or seat-occupancy
+  check; it would break deck fishing after any respawn.
 - **The rig menu opens only in equip standby.** After the line is in the water, `G`
   does nothing.
 
@@ -890,23 +998,14 @@ those elements makes the displayed value visibly lag the engine.
 
 ## 10. Known gaps, stale docs, and unverified claims
 
-**Documentation drift — `README.md` is wrong in two places:**
-
-1. README says the ox_inventory right-click "Manage Rod" button and the `/fishrig`
-   command open the rod-assembly menu. **Neither exists in the code.** A repo-wide
-   search for `fishrig` and `manageRod` returns only two comment lines in
-   `client/rig.lua` and one stale console string in `server/lib.lua` — there is no
-   `RegisterCommand('fishrig', ...)` and no `RegisterNetEvent('zfishing:manageRod',
-   ...)` anywhere. The only entry point to the rig menu is the `G` keybind during
-   equip standby, registered as `zfishing_rig` in `client/rig.lua`.
-2. README says "Database tables are created automatically on first start."
-   `server/store.lua`'s boot thread explicitly does not create schema; the
-   migrations under `migrations/mysql/` are applied by an external provisioner
-   before the resource starts.
-
 **Feature gaps carried from v1:**
 
-- No true fish release (see §9).
+- No true fish release. This is deferred to Phase 2, not a bug: the fish is
+  granted at claim time, before the catch card is even shown, and the card's
+  single "Continue" button (the `keep` NUI callback — see §3.4/§9) just closes
+  it. There is no longer a Keep/Release choice in the UI for a player to be
+  misled by; Task 7 removed the fake choice that used to make this look like an
+  oversight.
 - `simple-fishing` mode has no per-catch metadata: fish sell at species-average
   weight and 3★ quality, and rod assembly is disabled.
 - `zfishing_players.stats` is written as `{}` and never read — a reserved hook.
@@ -920,7 +1019,7 @@ those elements makes the displayed value visibly lag the engine.
   `water_validation_preservation.test.lua`); the NUI side by vitest +
   `@testing-library/react` + fast-check under `web/`. Neither exercises a real
   game client, a real inventory resource, or a real database.
-- The `web/` suite is currently green: **17 test files, 63 tests passing** (~9s,
+- The `web/` suite is currently green: **17 test files, 66 tests passing** (~6s,
   vitest 2.1.9). That includes `bundleRebuildPreservation.test.ts`, so the Lua
   sha256 baseline described in §8 invariant 7 currently *matches* the files on
   disk — the guard is live, not already broken.
@@ -942,7 +1041,7 @@ migration.
 | Add an equipment tier | `config/equipment.lua` + inventory registration; reseed `equipment` |
 | Add a fish behavior | `ConfigSchema.BEHAVIOR_TYPES`, `pullFor()` and `centerTargetFor()` in `minigameEngine.ts`, plus the constructor's amp/spd switch |
 | Add a water type | `ConfigSchema.WATER_TYPES` and `Config.Admin.waterTypes` |
-| Add a language | copy `locales/en.json` to `locales/<code>.json`, set `Config.Locale`; restart ox_inventory too if the rod button label matters |
+| Add a language | copy `locales/en.json` to `locales/<code>.json`, set `Config.Locale` |
 | Change a HUD surface | `web/src/components/`, then `npm run build` in `web/` and commit `web/dist` |
 | Add an admin-editable setting | `SETTING_KEYS` in `store.lua`, `ConfigSchema.Settings`, the `getConfig` payload in `admin.lua`, and a field in `web/src/admin/SettingsTab.tsx` |
 | Add a new session validation | `server/session.lua` only — and add a matching `error_<reason>` locale key |
