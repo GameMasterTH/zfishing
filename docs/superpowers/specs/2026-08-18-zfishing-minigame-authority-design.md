@@ -363,11 +363,19 @@ A new pure module — `shared/minigame_sim.lua`, following the discipline of
 | Finish conditions | `:155-167` | **ordering is load-bearing — see below** |
 
 The finish ordering at `:155-167` is `escape` → `success` → `snap` → `timeout`, and it
-must be reproduced exactly. `escape` is checked first, so a fish that recovers to full
-energy escapes even on the tick its energy would otherwise have hit zero; `success`
-precedes `snap`, so landing the fish on the same tick the line would have broken is a
-catch. Reordering these changes outcomes on boundary ticks and would show up as the
+must be reproduced exactly. `success` precedes `snap`, so landing the fish on the same
+tick the line would have broken is a catch; `escape` precedes `snap`, so a fish that
+recovers to full energy while the line is over-tensioned escapes rather than snapping;
+and `timeout` is last, so any other condition reached on the final tick wins over the
+clock. Reordering these changes outcomes on boundary ticks and would show up as the
 server disagreeing with the client the player watched.
+
+Note for whoever writes the ordering test: `escape` and `success` are **not** a
+load-bearing pair. `escape` requires `energy >= fishEnergy` and `success` requires
+`energy <= 0`, and `server/generator.lua:78` gives `fishEnergy = math.min(200, 40 + weight * 1.5)`,
+so `fishEnergy >= 40` and the two conditions are disjoint. The pairs that genuinely
+co-occur on a single tick — and therefore the ones worth asserting — are success/snap,
+escape/snap, escape/timeout, success/timeout and snap/timeout.
 
 **The Lua side becomes the reference; TypeScript mirrors it.** This is the inversion
 that matters. Today `minigameEngine.ts` is the only implementation. After this change
@@ -500,14 +508,49 @@ it in the payload (§3.3). Two generator instances per fight — one for `pullFo
   assert a catch it did not play.
 - The `reason == 'snap'` durability bypass at `server/session.lua:242` closes, because
   `reason` is now the server's own finish condition rather than a client claim.
-- The plausibility floor at `:227-232` — `minMs * 0.9`, Task 6's work — becomes
-  **redundant**. It exists to bound a number the server no longer accepts. It should be
-  deleted in the same change, not left as belt-and-braces around a variable that is no
-  longer an input. This is the honest measure of the rewrite's value: it makes Task 6
-  dead code.
+- The plausibility floor at `:227-232` — `minMs * 0.9`, Task 6's work — **does not go
+  away. It gets upgraded from a heuristic to an exact check.** This is the easiest thing
+  in the whole design to get wrong, so the reasoning is spelled out in §6.1.
 - The wall-clock guard at `:235` (`elapsed > reelTimeout + 5000`) **stays**. It is not a
   plausibility check on the outcome; it is a stall and latency sanity bound on how long a
   session may sit in `reeling`, and it is still needed.
+
+### 6.1 The timing floor must survive — do not delete it
+
+It is tempting to conclude that once the server integrates the fight itself, the
+plausibility floor is redundant: it exists to bound a `reelDurationMs` the server no
+longer accepts. **That conclusion is wrong and deleting the floor would be a security
+regression.**
+
+The input buffer is a list of tick *indices*. It carries no wall-clock information at
+all, and the server integrates it in a tight loop that completes in microseconds. So
+nothing in the buffer forces the player to have spent any real time playing. A client can
+call `hook`, wait 100ms, and submit a buffer that simulates a complete 8.3-second winning
+fight. The server integrates 166 ticks, reaches `success`, and pays. The guard at `:235`
+is an **upper** bound only (`elapsed > reelTimeout + 5000`) and does not catch this. The
+per-action gate at `:14` (3 claims / 3s) and `Config.RateLimit` (6 catches/minute) cap how
+*often* this can be done, but not the compression itself — and a natural cast-to-catch
+cycle is already only 3–5 catches/minute, so the cap leaves real headroom to exploit.
+
+**The floor gets better, not deleted.** Today `minMs` at `:227` is a worst-case *estimate*
+— it assumes a perfect green-zone hold for the entire fight, and the `* 0.9` at `:232` is
+a fudge factor absorbing frame quantisation. Under the new design the server knows the
+simulated duration **exactly**, because it computed it: the fight finished at
+`finishTick`, so it was supposed to take `finishTick * tickMs` milliseconds. The check
+becomes per-fight and fudge-free:
+
+```lua
+local simulatedMs = finishTick * tickMs
+local elapsed     = GetGameTimer() - s.reelStart
+if elapsed < simulatedMs - LATENCY_SLACK then
+    reset(src); return { ok = false, reason = 'too_fast' }
+end
+```
+
+`LATENCY_SLACK` covers the round trip and one tick of quantisation — a few hundred
+milliseconds, not a 10% multiplier. So the honest summary is not "the rewrite makes Task 6
+dead code". It is: **the rewrite turns Task 6's estimate into an exact bound, and applies
+it to every outcome rather than only to `success`.**
 
 **It does not stop a bot from playing perfectly, and the design should not pretend otherwise.**
 
@@ -537,7 +580,7 @@ These change together and cannot be staged independently:
 |---|---|
 | Add `tickMs`, mint the seed, ship the schedule | `config/main.lua` (`Config.Minigame.tickMs`), `server/config_schema.lua` (bounds for it), `server/session.lua:178-187` |
 | New simulation module | `shared/minigame_sim.lua` (new), `fxmanifest.lua:11-20` |
-| Server integrates and scores | `server/session.lua:214-247` — new `claim` signature, buffer validation, integration, derive `success`/`reason`; delete `:221-233` |
+| Server integrates and scores | `server/session.lua:214-247` — new `claim` signature, buffer validation, integration, derive `success`/`reason`; **replace** `:221-233` with the exact wall-clock floor (§6.1) — do not delete it |
 | Forward the schedule | `client/minigame.lua:38-44` |
 | Send the buffer | `client/minigame.lua:68-73` |
 | Mirror the reference | `web/src/engine/minigameEngine.ts` — sine table, seeded PRNG, no `Math.random` |
@@ -567,10 +610,15 @@ useful intermediate state that ships — do not attempt to land this in halves.
    raises the accepted buffer length in step. This is the regression a hard-coded cap
    would cause, so it needs its own test.
 4. *Outcome cases.* Server-derived `success`, `snap`, `timeout` and `escape` each reachable
-   from a constructed buffer, with the `:155-167` ordering asserted on boundary ticks.
-5. *The closed exploit.* A buffer whose fight genuinely snaps must break the line
+   from a constructed buffer, with the `:155-167` ordering asserted on boundary ticks —
+   using the co-occurring pairs named in §5.1, not the disjoint escape/success pair.
+5. *The compression attack (§6.1).* A buffer that simulates a **legitimate** winning fight
+   but arrives before `finishTick * tickMs` of wall clock has elapsed since `s.reelStart`
+   must be rejected. This is the test that catches the tempting deletion of the timing
+   floor, so it is not optional.
+6. *The closed exploit.* A buffer whose fight genuinely snaps must break the line
    component, with no client-supplied `reason` available to route around it.
-6. The Lua sha256 snapshot in `web/src/__tests__/bundleRebuildPreservation.test.ts`
+7. The Lua sha256 snapshot in `web/src/__tests__/bundleRebuildPreservation.test.ts`
    regenerates in the same commit (branch policy), and `web/dist` rebuilds and commits.
 
 **Retune gate.** Before merge, play the fight at the chosen `tickMs` and compare against
