@@ -29,7 +29,7 @@ The path is short and worth reading as one piece:
 |---|---|---|
 | Server rolls the fish, ships fight parameters | `server/session.lua:178-187` | `behavior, tensionDiff, fishEnergy, greenZone, snapFactor, drainRate, baseDrain, reelTimeout, fishWeight` |
 | Client forwards them to the NUI | `client/minigame.lua:38-44` | the same, plus `startedAt` |
-| NUI simulates the whole fight | `web/src/components/TensionMinigame.tsx:42-62` → `web/src/engine/minigameEngine.ts:109` | nothing — this is entirely client-side |
+| NUI simulates the whole fight | `web/src/components/TensionMinigame.tsx:42-60` → `web/src/engine/minigameEngine.ts:109` | nothing — this is entirely client-side |
 | NUI reports the verdict | `TensionMinigame.tsx:39` | `{ success, reason, durationMs }` |
 | Client claims | `client/minigame.lua:73` | `claim(sessionId, reelDurationMs, success, reason)` |
 | Server checks plausibility | `server/session.lua:214-237` | accepts or rejects on **timing only** |
@@ -287,6 +287,35 @@ reachable three times per three seconds through the existing gate at
 4. Reject the whole claim on any violation rather than repairing it. A malformed buffer
    is not a recoverable condition.
 
+**Pin the iteration primitive.** For a check whose stated purpose is flood resistance,
+do not reach for `#inputBuffer` or `ipairs`. The buffer arrives as a msgpack-decoded
+table the client controls, so it may be sparse, may carry string keys, or may have a nil
+hole — `#` on a non-sequence is implementation-defined in Lua, and `ipairs` silently
+stops at the first nil, which would let a client hide entries past a hole. Instead:
+
+```lua
+-- bounded numeric scan; establishes the length WITHOUT trusting `#`
+local n, prev = 0, -1
+for i = 1, tickCount do
+    local v = inputBuffer[i]
+    if v == nil then break end
+    if math.type(v) ~= 'integer' or v < 0 or v >= tickCount or v <= prev then
+        return { ok = false, reason = 'bad_buffer' }   -- covers checks 2 and 3
+    end
+    prev, n = v, i
+end
+-- nothing may live past the sequence, under any key
+if next(inputBuffer, n > 0 and n or nil) ~= nil then
+    return { ok = false, reason = 'bad_buffer' }
+end
+```
+
+The loop is bounded by `tickCount` before a single element is trusted, so the flood
+ceiling holds regardless of what the table actually contains. `math.type(v) ~= 'integer'`
+is the Lua 5.4 spelling for check 2 and rejects floats that happen to be integral, which
+keeps the encoding canonical. The trailing `next` is what makes the bound real: without
+it a client could park a million entries at index `tickCount + 1`.
+
 A practical tightening worth considering: humans cannot toggle a key faster than roughly
 every 60–80ms, so a minimum gap between transitions is defensible. It is deliberately
 *not* specified here — it is an input-pattern heuristic (§6), it will produce false
@@ -321,18 +350,57 @@ Three properties this must have:
 - **Rendering stays decoupled.** The NUI may draw at 144fps or 30fps; only the number of
   scheduled ticks consumed changes, never the physics. Interpolation between the last
   two states keeps the bars smooth at frame rates above the tick rate.
-- **A slow client falls behind, it does not desync.** If a frame takes 200ms the loop
-  runs four ticks in a row, sampling the same `holding` value. That is correct — it is
-  what the server will compute, because the server sees only the transition list. Guard
-  the `while` with a maximum catch-up (e.g. 8 ticks per frame) so a tab stall cannot
-  spiral.
+- **A client that catches up does not desync.** If a frame takes 200ms the loop runs four
+  ticks in a row, sampling the same `holding` value. That is correct — it is what the
+  server will compute, because the server sees only the transition list. Guard the `while`
+  with a maximum catch-up (e.g. 8 ticks per frame) so a tab stall cannot spiral.
+  **That guard is not a desync-free fallback.** A client stalled longer than it can absorb
+  stops advancing while the server's schedule does not, so the player's remaining input
+  lands on ticks that have already passed and the server integrates on to `timeout`. That
+  is the correct outcome — a player who was not there did not play the fight — but the NUI
+  must show it honestly rather than pretending the fight is still live. Surface it: if
+  `tickIndex` falls more than a fixed margin behind `wallClockElapsed / tickMs`, end the
+  fight client-side and claim with the buffer as it stands.
 
 `holdingRef` (`:27-28`) and the `reelInput` message that feeds it (`App.tsx:39-40`) stay
 exactly as they are. The Lua thread at `client/minigame.lua:49-59` already pushes on
-every change; the NUI samples that latched value at tick boundaries. **This part of the
+every change; the NUI samples that latched value at tick boundaries. **That part of the
 existing code is already correct for this design** and should not be touched.
 
-### 4.1 What does *not* move to the server
+### 4.1 The warm-up tick must go — it silently consumes PRNG draws
+
+`TensionMinigame.tsx:26` seeds React state by calling the engine once outside the RAF
+loop:
+
+```ts
+const [state, setState] = useState(() => engineRef.current!.tick(0, props.holding, 0))
+```
+
+This is a real `tick`, not a no-op, and it runs at `elapsed = 0`. Both `seedRef.until`
+fields start at 0 (`minigameEngine.ts:78-79`), so at `elapsed = 0` both re-roll guards
+fire: `centerTargetFor` draws once (`:62`) and `pullFor` draws twice (`:37-38`).
+
+**Measured: the warm-up tick consumes exactly 3 `Math.random()` draws for `erratic`, and
+0 for the other three behaviours.** (Instrumented by wrapping `Math.random` and
+constructing the shipped engine.) The following RAF tick consumes none, because the
+interval was just set to at least 700ms.
+
+Under the seeded PRNG of §5.3 that is a straight client/server divergence: the server's
+stream starts at draw 0 and the client's fight starts at draw 3. Every subsequent
+`erratic` value differs, the two simulations run different fights, and the player is
+scored on one they did not see.
+
+**The fix is to delete the warm-up call**, not to replicate it server-side — it exists
+only to give React a non-null first render, which an explicit zero state provides without
+touching the engine. Seed `useState` from a plain initial-state literal and let the first
+scheduled tick produce the first real state.
+
+Two reasons this is called out in its own section rather than left to the implementer:
+the parity test of §7 drives the two integrators directly and would **never** observe the
+warm-up call, and a naive reading of the migration table scopes the NUI rewrite to the
+`useEffect` at `:31-65`, which does not contain line 26. This bug survives both.
+
+### 4.2 What does *not* move to the server
 
 `shouldStreamEnergy`, `lastSentAt` and `lastSentPct` (`minigameEngine.ts:148-153`, `:81-82`)
 are presentation state. They throttle the `reelEnergy` NUI callback
@@ -364,10 +432,15 @@ A new pure module — `shared/minigame_sim.lua`, following the discipline of
 
 The finish ordering at `:155-167` is `escape` → `success` → `snap` → `timeout`, and it
 must be reproduced exactly. `success` precedes `snap`, so landing the fish on the same
-tick the line would have broken is a catch; `escape` precedes `snap`, so a fish that
-recovers to full energy while the line is over-tensioned escapes rather than snapping;
-and `timeout` is last, so any other condition reached on the final tick wins over the
-clock. Reordering these changes outcomes on boundary ticks and would show up as the
+tick the line would have broken is a catch; `escape` precedes `snap`, so a fish that has
+been worn below 98% and then recovers to full energy escapes rather than snapping even
+while the line is over-tensioned; and `timeout` is last, so any other condition reached on
+the final tick wins over the clock.
+
+`escape` is **two** conditions, not one — `this.damaged && this.energyV >= this.config.fishEnergy`
+(`:155`), where `damaged` is a latch set at `:145-146` the first time energy drops below
+98%. A test that drives energy straight to full without ever wearing the fish down cannot
+produce `escape` at all. Reordering these changes outcomes on boundary ticks and would show up as the
 server disagreeing with the client the player watched.
 
 Note for whoever writes the ordering test: `escape` and `success` are **not** a
@@ -453,8 +526,35 @@ between entries. Requirements:
 - Entry count fixed and identical on both sides (256 is ample: the band centre is a
   slow visual oscillation, and interpolation error at 256 entries is far below the
   ~1-unit visual resolution of the bar).
-- Index derivation is integer arithmetic; interpolation is multiply and add. Both are in
-  the bit-exact class from Result 1.
+- **Pin the range reduction explicitly — this is the part Result 1 does not cover.**
+  Result 1 establishes exactness for multiply, add, compare and clamp. A table lookup
+  needs one more step: reducing `elapsed / spd` modulo one period before flooring to an
+  index. That reduction happens in *floating point*, and the two languages do not agree
+  on the obvious spelling. **Lua 5.4's float `%` is floor-mod; JavaScript's is
+  truncated.** Measured: `-3.2 % 5000` is `4996.8` in Lua and `-3.2` in JS. They coincide
+  only for non-negative operands.
+
+  So do not write `x % TWO_PI`. Write the reduction the same way in both files:
+
+  ```
+  phase = x - floor(x / TWO_PI) * TWO_PI
+  ```
+
+  Measured bit-identical across the full argument range (`elapsed` 0–30000ms at 1ms
+  steps, 30001 samples, **0 mismatches**). Only *then* is the index integer arithmetic
+  and the interpolation multiply-and-add, both in the bit-exact class from Result 1.
+
+  Commit `TWO_PI` as a decimal literal (`6.283185307179586`) rather than computing
+  `math.pi * 2` / `Math.PI * 2`. The two hosts happen to agree on that product today —
+  verified — but the whole point of the table is to stop depending on host-provided
+  numerics, and a literal costs nothing.
+
+- **The same hazard applies to the `run_stop` branches**, which use `t % 5000` (`:32`)
+  and `elapsed % 5000` (`:57`). Both operands are non-negative on every real path
+  (`elapsed` starts at 0 and only increases), so Lua and JS agree *there* — but the
+  precondition is load-bearing and undocumented in the current code. State it in the
+  ported module's header, or use the same explicit reduction form so correctness does not
+  rest on a precondition a future edit could break.
 
 This also removes the last obstacle to a meaningful parity test: with no transcendental,
 a cross-runtime test asserting **bit-identical** results is achievable and is the right
@@ -547,8 +647,14 @@ if elapsed < simulatedMs - LATENCY_SLACK then
 end
 ```
 
-`LATENCY_SLACK` covers the round trip and one tick of quantisation — a few hundred
-milliseconds, not a 10% multiplier. So the honest summary is not "the rewrite makes Task 6
+`LATENCY_SLACK` covers one tick of sampling quantisation plus one client/server round
+trip. Derive it rather than picking a number: `tickMs + Config.Timings.hookLatency`,
+which is **350ms** at the proposed `tickMs = 50`. `hookLatency` (`config/main.lua:16`,
+300ms) is this codebase's existing allowance for exactly this — `server/session.lua:173`
+already adds it to the hook deadline for the same reason — so reusing it keeps one
+latency assumption in one place instead of introducing a second, unrelated constant.
+Note this is a fixed allowance, not the `* 0.9` proportional fudge it replaces: it does
+not scale with fight length, so a long fight is bounded just as tightly as a short one. So the honest summary is not "the rewrite makes Task 6
 dead code". It is: **the rewrite turns Task 6's estimate into an exact bound, and applies
 it to every outcome rather than only to `success`.**
 
@@ -584,7 +690,7 @@ These change together and cannot be staged independently:
 | Forward the schedule | `client/minigame.lua:38-44` |
 | Send the buffer | `client/minigame.lua:68-73` |
 | Mirror the reference | `web/src/engine/minigameEngine.ts` — sine table, seeded PRNG, no `Math.random` |
-| Fixed-step loop and buffer capture | `web/src/components/TensionMinigame.tsx:31-65` |
+| Fixed-step loop and buffer capture | `web/src/components/TensionMinigame.tsx:31-65`, **and `:26` — delete the warm-up `tick` call (§4.1); it is outside the `useEffect` and is easily missed** |
 | Pass the schedule through | `web/src/App.tsx:73-85` |
 
 `client/minigame.lua:49-59` and `App.tsx:39-40` — the `holding` transition path — are
@@ -597,28 +703,34 @@ useful intermediate state that ships — do not attempt to land this in halves.
 
 **Test strategy:**
 
-1. *Parity, bit-exact.* Drive both implementations with the same buffer, seed and config;
+1. *End-to-end parity through the NUI, not just the engines.* The direct-engine parity
+   test below is necessary but **not sufficient**: it constructs the engine itself and so
+   cannot see the warm-up call at `TensionMinigame.tsx:26` (§4.1), or any other draw the
+   component makes before the loop starts. Add one test that mounts the component, plays a
+   fixed `erratic` fight, and asserts the resulting buffer scores identically on the Lua
+   side. This is the only test in the suite that would catch a PRNG stream offset.
+2. *Parity, bit-exact.* Drive both implementations with the same buffer, seed and config;
    assert identical tension, energy, snap budget, finish tick and finish reason. Assert
    **equality**, not a tolerance — §5.2 shows that is achievable once the transcendental
    is gone, and a tolerance would hide the exact class of bug this test exists to catch.
    Run it across all four behaviours and both `erratic` PRNG streams.
-2. *Buffer validation.* Over-length, non-integer, out-of-range, non-monotonic and
+3. *Buffer validation.* Over-length, non-integer, out-of-range, non-monotonic and
    duplicate-index buffers are each rejected before integration. Assert the integration
    function is never entered (a call-count spy on the sim module), not merely that the
    claim failed.
-3. *Cap derivation.* Raising `Config.Timings.reelTimeout` to the schema maximum of 120000
+4. *Cap derivation.* Raising `Config.Timings.reelTimeout` to the schema maximum of 120000
    raises the accepted buffer length in step. This is the regression a hard-coded cap
    would cause, so it needs its own test.
-4. *Outcome cases.* Server-derived `success`, `snap`, `timeout` and `escape` each reachable
+5. *Outcome cases.* Server-derived `success`, `snap`, `timeout` and `escape` each reachable
    from a constructed buffer, with the `:155-167` ordering asserted on boundary ticks —
    using the co-occurring pairs named in §5.1, not the disjoint escape/success pair.
-5. *The compression attack (§6.1).* A buffer that simulates a **legitimate** winning fight
+6. *The compression attack (§6.1).* A buffer that simulates a **legitimate** winning fight
    but arrives before `finishTick * tickMs` of wall clock has elapsed since `s.reelStart`
    must be rejected. This is the test that catches the tempting deletion of the timing
    floor, so it is not optional.
-6. *The closed exploit.* A buffer whose fight genuinely snaps must break the line
+7. *The closed exploit.* A buffer whose fight genuinely snaps must break the line
    component, with no client-supplied `reason` available to route around it.
-7. The Lua sha256 snapshot in `web/src/__tests__/bundleRebuildPreservation.test.ts`
+8. The Lua sha256 snapshot in `web/src/__tests__/bundleRebuildPreservation.test.ts`
    regenerates in the same commit (branch policy), and `web/dist` rebuilds and commits.
 
 **Retune gate.** Before merge, play the fight at the chosen `tickMs` and compare against
