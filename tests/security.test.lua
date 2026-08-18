@@ -14,6 +14,7 @@
 --   E. Distance / rate controls          (session.lua)               6.5 / 23.5
 --   F. Server-authoritative anti-cheat   (session claim/hook timing) 6.5 / 23.5
 --   G. Absence of boot-time DB/host mutation (all server modules)    27.1
+--   H. Boat anchor ownership         (boat_anchor.lua proximity) 6.5 / 23.5
 
 local tests = {}
 local function test(name, cb) tests[#tests + 1] = { name = name, callback = cb } end
@@ -854,6 +855,98 @@ test('G3 the runtime lock is read once from zcore_lib, never auto-probed schema'
     for _, fn in ipairs(THREADS) do pcall(fn) end
     -- with an unavailable profile, fishing is blocked and no cast/claim path can run
     truthy(Zfishing.Blocked(), 'an unavailable runtime profile blocks gameplay')
+end)
+
+-- =============================================================== GROUP H
+-- Boat anchor ownership (boat_anchor.lua) — Requirements 6.5, 23.5
+-- zfishing:server:anchorBoat took any netId and the server broadcast the result
+-- to -1, so a modified client could freeze any boat on the map. The server now
+-- resolves the entity and requires the requester to be next to it. Proximity,
+-- NOT seat occupancy: getFishingBoat() also matches the closest boat within
+-- 3.5m, so standing on the deck is a supported fishing position and
+-- GetVehiclePedIsIn returns 0 for those players.
+
+local function loadBoatAnchor(pedPos, vehPos)
+    installHost()
+    BoatAnchor = nil                -- so a failed load is loud, like installHost() does
+    local peds, vehs = { [5] = 55 }, { [900] = 99 }
+    _G.GetPlayerPed = function(src) return peds[src] or 0 end
+    _G.NetworkGetEntityFromNetworkId = function(netId) return vehs[netId] or 0 end
+    _G.DoesEntityExist = function(e) return e ~= 0 end
+    _G.GetEntityCoords = function(e)
+        if e == 55 then return pedPos end
+        if e == 99 then return vehPos end
+        return { x = 0.0, y = 0.0, z = 0.0 }
+    end
+    dofile('server/boat_anchor.lua')
+end
+
+test('H1 anchoring a boat the player is nowhere near is refused', function()
+    loadBoatAnchor({ x = 0.0, y = 0.0, z = 0.0 }, { x = 500.0, y = 500.0, z = 0.0 })
+    falsy(BoatAnchor.Add(5, 900), 'a remote netId must not anchor')
+    equal(#spy.clientEvents, 0, 'no anchor broadcast may be sent')
+end)
+
+test('H2 a player standing on the deck (not seated) still anchors', function()
+    -- 4m from the vehicle origin: past the client 3.5m probe, well inside the
+    -- server allowance, and exactly the deck-standing case a seat check breaks.
+    loadBoatAnchor({ x = 4.0, y = 0.0, z = 1.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900), 'deck-standing must still anchor')
+    equal(#spy.clientEvents, 1, 'the anchor broadcast fires once')
+    local ev = spy.clientEvents[1]
+    equal(ev.event, 'zfishing:client:syncBoatAnchor', 'the anchor sync event')
+    equal(ev.target, -1, 'boat state must agree across every client')
+    equal(ev.args[1], 900, 'the netId that was anchored')
+    equal(ev.args[2], true, 'state=true')
+end)
+
+test('H3 a nonexistent entity is refused', function()
+    loadBoatAnchor({ x = 0.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    falsy(BoatAnchor.Add(5, 12345), 'an unknown netId must not anchor')
+    equal(#spy.clientEvents, 0)
+end)
+
+test('H4 unanchor is validated the same way', function()
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900))
+    -- another player, far away, must not be able to release it
+    _G.GetPlayerPed = function(src) return src == 5 and 55 or 77 end
+    _G.GetEntityCoords = function(e)
+        if e == 55 then return { x = 1.0, y = 0.0, z = 0.0 } end
+        if e == 77 then return { x = 900.0, y = 0.0, z = 0.0 } end
+        return { x = 0.0, y = 0.0, z = 0.0 }
+    end
+    falsy(BoatAnchor.Remove(6, 900), 'a distant player must not release the anchor')
+    equal(#spy.clientEvents, 1, 'only the original anchor broadcast was sent')
+end)
+
+test('H5 a holder who is no longer near the boat cannot release the anchor', function()
+    -- H4 is already refused by the pre-existing players[src] bookkeeping, so it
+    -- does not exercise the new guard. This does: src 5 IS the registered
+    -- holder, and the release is a position claim exactly like the anchor was.
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900), 'the holder anchors while aboard')
+    equal(#spy.clientEvents, 1)
+    _G.GetEntityCoords = function(e)
+        if e == 55 then return { x = 500.0, y = 0.0, z = 0.0 } end
+        return { x = 0.0, y = 0.0, z = 0.0 }
+    end
+    falsy(BoatAnchor.Remove(5, 900), 'an out-of-range release must be refused')
+    equal(#spy.clientEvents, 1, 'no unanchor broadcast may be sent')
+end)
+
+test('H6 the holder still aboard releases the anchor and it is broadcast', function()
+    -- The accept path for Remove: a guard that refused everyone would satisfy
+    -- H4 and H5 while silently making every anchored boat permanent.
+    loadBoatAnchor({ x = 4.0, y = 0.0, z = 1.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900), 'deck-standing anchors')
+    truthy(BoatAnchor.Remove(5, 900), 'the same deck-standing player releases')
+    equal(#spy.clientEvents, 2, 'anchor then unanchor')
+    local ev = spy.clientEvents[2]
+    equal(ev.event, 'zfishing:client:syncBoatAnchor', 'the anchor sync event')
+    equal(ev.target, -1, 'the release must reach every client too')
+    equal(ev.args[1], 900, 'the netId that was released')
+    equal(ev.args[2], false, 'state=false')
 end)
 
 -- ---------------------------------------------------------------- runner
