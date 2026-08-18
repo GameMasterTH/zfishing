@@ -81,9 +81,11 @@ function Generator.Roll(src, ctx)
     }
 end
 
--- QA helper: /zfish_roll [water] samples one roll
+-- QA helper: /zfish_roll [water] samples one roll. Admin-gated -- it leaks the
+-- generator's behaviour and is a QA tool, not a player command.
 RegisterCommand('zfish_roll', function(src, args)
     if src == 0 then return end
+    if not exports.zcore_lib:IsAdmin(src, 'zfishing.admin') then return end
     local water = args[1] or 'ocean'
     local f = Generator.Roll(src, { water = water, rod='fishing_rod_common', hook='hook_4', bait='worm' })
     if f then

@@ -44,9 +44,11 @@ AddEventHandler('playerDropped', function()
     Progression.Unload(source)
 end)
 
--- QA helper: grants 50 xp and reports level/xp
+-- QA helper: grants 50 xp and reports level/xp. Admin-gated -- an ungated
+-- version lets any player unlock every rod tier for free.
 RegisterCommand('zfish_xp', function(src)
     if src == 0 then return end
+    if not exports.zcore_lib:IsAdmin(src, 'zfishing.admin') then return end
     if not Progression.Get(src) then Progression.Load(src) end
     Progression.AddXP(src, 50)
     Progression.Save(src)

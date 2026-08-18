@@ -337,6 +337,59 @@ test('C4b admin commands open UI for an admin', function()
     truthy(#spy.clientEvents >= 1, 'an admin must be able to open the panel')
 end)
 
+-- Builds the two QA commands (zfish_xp, zfish_roll) with an injected IsAdmin
+-- decision, then shadows the store/generator-backed calls with spies so the
+-- test observes only whether the command's own admin gate ran -- not whether
+-- a real DB or fish table is wired up. Records every IsAdmin call so a test
+-- can assert the exact src/ace checked, not just the boolean result --
+-- otherwise a gate on the wrong ACE string would still read as "gated".
+local function loadQACommands(isAdminResult)
+    installHost()
+    local adminCalls = {}
+    _G.exports = { zcore_lib = {
+        IsAdmin = function(_, src, ace) adminCalls[#adminCalls + 1] = { src = src, ace = ace }; return isAdminResult end,
+        Notify = function() end,
+    } }
+    dofile('shared/util.lua')
+    dofile('server/progression.lua')
+    dofile('server/generator.lua')
+
+    local xpAdded, rollCalls = 0, 0
+    Progression.Get = function() return { level = 1, xp = 0, identifier = 'license:test' } end
+    Progression.Load = function() end
+    Progression.Save = function() end
+    Progression.AddXP = function(_, amount) xpAdded = xpAdded + amount end
+    Generator.Roll = function()
+        rollCalls = rollCalls + 1
+        return { label = 'Bass', weight = 1.0, quality = 3, rarity = 'common' }
+    end
+
+    return function() return xpAdded end, function() return rollCalls end, adminCalls
+end
+
+test('C5 the QA commands refuse a non-admin caller', function()
+    local getXpAdded, getRollCalls, adminCalls = loadQACommands(false)
+    truthy(CMD['zfish_xp'], 'the command must still be registered')
+    truthy(CMD['zfish_roll'], 'the command must still be registered')
+    CMD['zfish_xp'](5, {})
+    CMD['zfish_roll'](5, {})
+    equal(getXpAdded(), 0, 'a non-admin must not be granted XP')
+    equal(getRollCalls(), 0, 'a non-admin must not be able to sample the generator')
+    equal(#adminCalls, 2, 'both commands must consult IsAdmin')
+    equal(adminCalls[1].src, 5); equal(adminCalls[1].ace, 'zfishing.admin')
+    equal(adminCalls[2].src, 5); equal(adminCalls[2].ace, 'zfishing.admin')
+end)
+
+test('C5b the QA commands still work for an authorized admin', function()
+    local getXpAdded, getRollCalls, adminCalls = loadQACommands(true)
+    CMD['zfish_xp'](5, {})
+    CMD['zfish_roll'](5, {})
+    equal(getXpAdded(), 50, 'an admin must still be able to grant themselves QA xp')
+    equal(getRollCalls(), 1, 'an admin must still be able to sample the generator')
+    equal(#adminCalls, 2, 'both commands must consult IsAdmin')
+    equal(adminCalls[1].ace, 'zfishing.admin'); equal(adminCalls[2].ace, 'zfishing.admin')
+end)
+
 -- =============================================================== GROUP D
 -- Exact-slot ownership (rig.lua) — Requirements 23.5, 27.1
 -- The server re-reads the named slot from the player's OWN inventory; a client
