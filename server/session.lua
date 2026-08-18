@@ -8,6 +8,25 @@ local rate = {}       -- [src] = { count, windowStart }
 
 local function reset(src) sessions[src] = nil end
 
+local nextSessionSeq = 0
+
+-- Session tokens are correlation + stale-request protection, not secrets: a
+-- modified client can always read its own. The sequence guarantees uniqueness
+-- even if math.random repeats; the random half stops a client guessing the
+-- token of a session it does not own.
+local function newSessionId()
+    nextSessionSeq = nextSessionSeq + 1
+    return ('%d-%d'):format(nextSessionSeq, math.random(100000, 999999))
+end
+
+-- Resolves the caller's session only when the token matches. Every transition
+-- goes through this -- never read sessions[src] directly in a callback.
+local function sessionFor(src, sessionId)
+    local s = sessions[src]
+    if not s or type(sessionId) ~= 'string' or s.id ~= sessionId then return nil end
+    return s
+end
+
 local function withinRate(src)
     local now = os.time()
     local r = rate[src]
@@ -128,6 +147,7 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
     end
 
     sessions[src] = {
+        id = newSessionId(),
         state = 'waiting', fish = fish, bait = chosenBait, rod = rod,
         lineRating = stats and stats.lineRating or resolveLineRating(src, level),
         reelDrain = stats and stats.reelDrain or nil,
@@ -163,12 +183,13 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
 
     local rodCfg = Config.Equipment.rods[rod] or {}
     local baitCfg = Config.Equipment.baits[chosenBait] or {}
-    return { ok = true, rod = rodCfg.label, bait = baitCfg.label }
+    return { ok = true, sessionId = sessions[src].id, rod = rodCfg.label, bait = baitCfg.label }
 end)
 
-lib.callback.register('zfishing:hook', function(src)
-    local s = sessions[src]
-    if not s or s.state ~= 'hooking' then return { ok = false } end
+lib.callback.register('zfishing:hook', function(src, sessionId)
+    local s = sessionFor(src, sessionId)
+    if not s then return { ok = false, reason = 'invalid_session' } end
+    if s.state ~= 'hooking' then return { ok = false } end
     if GetGameTimer() > s.hookDeadline then
         reset(src)
         return { ok = false, reason = 'too_slow' }
@@ -178,9 +199,10 @@ lib.callback.register('zfishing:hook', function(src)
     return { ok = true }
 end)
 
-lib.callback.register('zfishing:claim', function(src, reelDurationMs, success, reason)
-    local s = sessions[src]
-    if not s or s.state ~= 'reeling' then return { ok = false } end
+lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)
+    local s = sessionFor(src, sessionId)
+    if not s then return { ok = false, reason = 'invalid_session' } end
+    if s.state ~= 'reeling' then return { ok = false } end
     local fish = s.fish
 
     -- minimum plausible reel time: NUI drains 12 * drainRate energy/sec in the
@@ -212,7 +234,8 @@ lib.callback.register('zfishing:claim', function(src, reelDurationMs, success, r
     return { ok = true, fish = { label = fish.label, weight = fish.weight, quality = fish.quality, species = fish.species } }
 end)
 
-lib.callback.register('zfishing:cancel', function(src)
+lib.callback.register('zfishing:cancel', function(src, sessionId)
+    if not sessionFor(src, sessionId) then return { ok = false, reason = 'invalid_session' } end
     reset(src); return { ok = true }
 end)
 

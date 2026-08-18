@@ -26,11 +26,11 @@ RegisterNetEvent('zfishing:bite', function(data)
     if not ZClient.active then return end
 
     if not hooked then
-        lib.callback.await('zfishing:cancel', false)
+        lib.callback.await('zfishing:cancel', false, ZClient.sessionId)
         return endFishing('fish_escaped', 'error')
     end
 
-    local res = lib.callback.await('zfishing:hook', false)
+    local res = lib.callback.await('zfishing:hook', false, ZClient.sessionId)
     if not res or not res.ok then
         return endFishing('fish_escaped', 'error')
     end
@@ -69,7 +69,7 @@ RegisterNUICallback('reelResult', function(body, cb)
     if not ZClient.reeling then return end
     ZClient.reeling = false
 
-    local res = lib.callback.await('zfishing:claim', false, body.durationMs or 0, body.success == true, body.reason)
+    local res = lib.callback.await('zfishing:claim', false, ZClient.sessionId, body.durationMs or 0, body.success == true, body.reason)
     if res and res.ok and res.fish then
         SendNUIMessage({ action = 'caught',
             label = res.fish.label, weight = res.fish.weight, quality = res.fish.quality })

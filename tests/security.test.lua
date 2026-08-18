@@ -540,10 +540,10 @@ local function fullCatch(src, rodSlot)
     if not cast.ok then return cast, nil end
     truthy(TIMERS[1], 'cast must schedule the bite timer')
     TIMERS[1].fn()                       -- bite fires -> state 'hooking'
-    local hook = CB['zfishing:hook'](src)
+    local hook = CB['zfishing:hook'](src, cast.sessionId)
     truthy(hook.ok, 'hook must succeed inside the window')
     _G.__NOW = _G.__NOW + 6000           -- plenty of reel time
-    local claim = CB['zfishing:claim'](src, 6000, true, nil)
+    local claim = CB['zfishing:claim'](src, cast.sessionId, 6000, true, nil)
     return cast, claim
 end
 
@@ -598,9 +598,9 @@ test('F1 claim rejects an implausibly fast reel and grants no reward', function(
     local cast = CB['zfishing:cast'](5, 0.5)
     truthy(cast.ok)
     TIMERS[1].fn()
-    truthy(CB['zfishing:hook'](5).ok)
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
     _G.__NOW = _G.__NOW + 300            -- way under the minimum plausible reel time
-    local claim = CB['zfishing:claim'](5, 300, true, nil)
+    local claim = CB['zfishing:claim'](5, cast.sessionId, 300, true, nil)
     falsy(claim.ok)
     equal(claim.reason, 'too_fast')
     equal(rewardCalls.give, 0, 'no reward is handed out for a rejected claim')
@@ -608,17 +608,59 @@ end)
 
 test('F2 claim is refused unless the session is in the reeling state', function()
     loadSession({ requireZone = false })
-    falsy(CB['zfishing:claim'](5, 5000, true, nil).ok, 'cannot claim without a live reeling session')
+    local cast = CB['zfishing:cast'](5, 0.5)
+    falsy(CB['zfishing:claim'](5, cast.sessionId, 5000, true, nil).ok, 'cannot claim without a live reeling session')
 end)
 
 test('F3 hook is refused after the hook window deadline passes', function()
     loadSession({ requireZone = false })
-    truthy(CB['zfishing:cast'](5, 0.5).ok)
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
     TIMERS[1].fn()                       -- state 'hooking', deadline = now + window + latency
     _G.__NOW = _G.__NOW + 100000         -- blow past the deadline
-    local hook = CB['zfishing:hook'](5)
+    local hook = CB['zfishing:hook'](5, cast.sessionId)
     falsy(hook.ok)
     equal(hook.reason, 'too_slow')
+end)
+
+test('F4 claim with a stale or missing sessionId is refused and the session survives', function()
+    local _, rewardCalls = loadSession({ requireZone = false })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    truthy(cast.sessionId, 'cast must return a sessionId')
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local bad = CB['zfishing:claim'](5, 'not-the-session', 6000, true, nil)
+    falsy(bad.ok)
+    equal(bad.reason, 'invalid_session')
+    equal(rewardCalls.give, 0, 'a bad token grants nothing')
+
+    local missing = CB['zfishing:claim'](5, nil, 6000, true, nil)
+    falsy(missing.ok)
+    equal(missing.reason, 'invalid_session')
+
+    local good = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    truthy(good.ok, 'the live session still settles after bad-token attempts')
+    equal(rewardCalls.give, 1)
+end)
+
+test('F5 hook and cancel also require the session token', function()
+    loadSession({ requireZone = false })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    equal(CB['zfishing:hook'](5, 'wrong').reason, 'invalid_session')
+    equal(CB['zfishing:cancel'](5, 'wrong').reason, 'invalid_session')
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok, 'the correct token still works')
+end)
+
+test('F6 each cast mints a distinct session token', function()
+    loadSession({ requireZone = false })
+    local first = CB['zfishing:cast'](5, 0.5)
+    CB['zfishing:cancel'](5, first.sessionId)
+    local second = CB['zfishing:cast'](5, 0.5)
+    truthy(first.sessionId ~= second.sessionId, 'a new cast must not reuse the previous token')
 end)
 
 test('D4 assembly cast trusts the server-read slot, not a client-named one', function()

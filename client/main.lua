@@ -129,6 +129,7 @@ local function cleanup(msgKey, msgType)
     ZClient.active = false
     ZClient.reeling = false
     ZClient.standby = false
+    ZClient.sessionId = nil
     TriggerEvent('zfishing:rig:forceClose')             -- close the rig menu if it's open when fishing ends
     Casting.RemoveFloat()
     Anim.Stop()
@@ -228,6 +229,7 @@ local function startFishing()
         cleanup(res and res.reason and ('error_' .. res.reason) or 'error_busy', 'error')
         return
     end
+    ZClient.sessionId = res.sessionId
 
     if Config.FreezeWhileFishing and not boat then FreezeEntityPosition(PlayerPedId(), true) end
 
@@ -245,7 +247,7 @@ RegisterCommand('zfishing_cancel', function()
     if not ZClient.active then return end
     ZClient.reeling = false
     CreateThread(function()
-        lib.callback.await('zfishing:cancel', false)
+        lib.callback.await('zfishing:cancel', false, ZClient.sessionId)
         cleanup('cancelled')
     end)
 end, false)
