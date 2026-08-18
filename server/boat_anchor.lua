@@ -13,8 +13,15 @@ local boatAnchors = {} -- [netId] = { count = N, players = { [src] = true } }
 -- request fires before the attach so there is no attachment state to read.
 local ANCHOR_RANGE_SQ = 15.0 * 15.0
 
+-- netId arrives straight off a net event, so it is whatever the client sent. A
+-- table reaches NetworkGetEntityFromNetworkId and raises, so both entry points
+-- fail closed on a non-number first (house pattern: server/weather.lua:8).
+local function validNetId(netId)
+    return type(netId) == 'number' and netId ~= 0
+end
+
 local function playerNearVehicle(src, netId)
-    if not netId or netId == 0 then return false end
+    if not validNetId(netId) then return false end
     local veh = NetworkGetEntityFromNetworkId(netId)
     if not veh or veh == 0 or not DoesEntityExist(veh) then return false end
     local ped = GetPlayerPed(src)
@@ -38,8 +45,18 @@ function BoatAnchor.Add(src, netId)
     return false
 end
 
+-- Deliberately NOT proximity-checked, unlike Add. The client has no death
+-- handling, so ZClient.active and currentBoatNetId survive a death: a player who
+-- dies while fishing, respawns at a hospital and bails out with X sends this from
+-- a kilometre away, and client/main.lua:140-143 nils currentBoatNetId
+-- unconditionally, so a refusal could never be retried -- the boat would stay
+-- frozen until that player disconnected, and the stale reference would also block
+-- a co-angler's legitimate release. Refusing here prevents nothing: players[src]
+-- membership is a capability obtainable only by passing playerNearVehicle inside
+-- Add, so a remote caller can at most release the one reference they legitimately
+-- acquired, and Add still requires proximity so there is no re-anchor loop.
 function BoatAnchor.Remove(src, netId)
-    if not playerNearVehicle(src, netId) then return false end
+    if not validNetId(netId) then return false end
     if not boatAnchors[netId] then return false end
     if boatAnchors[netId].players[src] then
         boatAnchors[netId].players[src] = nil

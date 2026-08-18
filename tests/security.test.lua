@@ -860,18 +860,28 @@ end)
 -- =============================================================== GROUP H
 -- Boat anchor ownership (boat_anchor.lua) — Requirements 6.5, 23.5
 -- zfishing:server:anchorBoat took any netId and the server broadcast the result
--- to -1, so a modified client could freeze any boat on the map. The server now
--- resolves the entity and requires the requester to be next to it. Proximity,
--- NOT seat occupancy: getFishingBoat() also matches the closest boat within
--- 3.5m, so standing on the deck is a supported fishing position and
--- GetVehiclePedIsIn returns 0 for those players.
+-- to -1, so a modified client could freeze any boat on the map. Add now resolves
+-- the entity and requires the requester to be next to it. Proximity, NOT seat
+-- occupancy: getFishingBoat() also matches the closest boat within 3.5m, so
+-- standing on the deck is a supported fishing position and GetVehiclePedIsIn
+-- returns 0 for those players.
+--
+-- Remove is deliberately NOT proximity-checked -- see H6 and the comment above
+-- BoatAnchor.Remove. Both entry points do reject a non-number netId (H7).
 
 local function loadBoatAnchor(pedPos, vehPos)
     installHost()
     BoatAnchor = nil                -- so a failed load is loud, like installHost() does
     local peds, vehs = { [5] = 55 }, { [900] = 99 }
     _G.GetPlayerPed = function(src) return peds[src] or 0 end
-    _G.NetworkGetEntityFromNetworkId = function(netId) return vehs[netId] or 0 end
+    _G.NetworkGetEntityFromNetworkId = function(netId)
+        -- the real native raises when handed a non-number, which is the
+        -- console-spam path a hostile client can trigger; keep the stub faithful
+        if type(netId) ~= 'number' then
+            error('Invalid argument #1 to NetworkGetEntityFromNetworkId', 2)
+        end
+        return vehs[netId] or 0
+    end
     _G.DoesEntityExist = function(e) return e ~= 0 end
     _G.GetEntityCoords = function(e)
         if e == 55 then return pedPos end
@@ -906,38 +916,19 @@ test('H3 a nonexistent entity is refused', function()
     equal(#spy.clientEvents, 0)
 end)
 
-test('H4 unanchor is validated the same way', function()
+test('H4 a player who never anchored cannot release someone else\'s anchor', function()
     loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
     truthy(BoatAnchor.Add(5, 900))
-    -- another player, far away, must not be able to release it
+    -- src 6 holds no reference; players[src] membership is the capability, and
+    -- it can only be obtained by passing the proximity check inside Add
     _G.GetPlayerPed = function(src) return src == 5 and 55 or 77 end
-    _G.GetEntityCoords = function(e)
-        if e == 55 then return { x = 1.0, y = 0.0, z = 0.0 } end
-        if e == 77 then return { x = 900.0, y = 0.0, z = 0.0 } end
-        return { x = 0.0, y = 0.0, z = 0.0 }
-    end
-    falsy(BoatAnchor.Remove(6, 900), 'a distant player must not release the anchor')
+    falsy(BoatAnchor.Remove(6, 900), 'a non-holder must not release the anchor')
     equal(#spy.clientEvents, 1, 'only the original anchor broadcast was sent')
 end)
 
-test('H5 a holder who is no longer near the boat cannot release the anchor', function()
-    -- H4 is already refused by the pre-existing players[src] bookkeeping, so it
-    -- does not exercise the new guard. This does: src 5 IS the registered
-    -- holder, and the release is a position claim exactly like the anchor was.
-    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
-    truthy(BoatAnchor.Add(5, 900), 'the holder anchors while aboard')
-    equal(#spy.clientEvents, 1)
-    _G.GetEntityCoords = function(e)
-        if e == 55 then return { x = 500.0, y = 0.0, z = 0.0 } end
-        return { x = 0.0, y = 0.0, z = 0.0 }
-    end
-    falsy(BoatAnchor.Remove(5, 900), 'an out-of-range release must be refused')
-    equal(#spy.clientEvents, 1, 'no unanchor broadcast may be sent')
-end)
-
-test('H6 the holder still aboard releases the anchor and it is broadcast', function()
+test('H5 the holder still aboard releases the anchor and it is broadcast', function()
     -- The accept path for Remove: a guard that refused everyone would satisfy
-    -- H4 and H5 while silently making every anchored boat permanent.
+    -- H4 while silently making every anchored boat permanent.
     loadBoatAnchor({ x = 4.0, y = 0.0, z = 1.0 }, { x = 0.0, y = 0.0, z = 0.0 })
     truthy(BoatAnchor.Add(5, 900), 'deck-standing anchors')
     truthy(BoatAnchor.Remove(5, 900), 'the same deck-standing player releases')
@@ -947,6 +938,35 @@ test('H6 the holder still aboard releases the anchor and it is broadcast', funct
     equal(ev.target, -1, 'the release must reach every client too')
     equal(ev.args[1], 900, 'the netId that was released')
     equal(ev.args[2], false, 'state=false')
+end)
+
+test('H6 a holder who died and respawned far away can still release the anchor', function()
+    -- Remove must NOT be proximity-checked. The client has no death handling, so
+    -- ZClient.active and currentBoatNetId survive a death: die while fishing,
+    -- respawn at a hospital, press X, and cleanup() sends unanchorBoat from a
+    -- kilometre away. client/main.lua:140-143 nils currentBoatNetId
+    -- unconditionally, so a refusal could never be retried and the boat would
+    -- stay frozen until that player disconnected.
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900), 'the holder anchors while aboard')
+    equal(#spy.clientEvents, 1)
+    _G.GetEntityCoords = function(e)
+        if e == 55 then return { x = 1000.0, y = 0.0, z = 0.0 } end   -- respawned
+        return { x = 0.0, y = 0.0, z = 0.0 }
+    end
+    truthy(BoatAnchor.Remove(5, 900), 'the holder must still be able to release')
+    equal(#spy.clientEvents, 2, 'the release is broadcast')
+    equal(spy.clientEvents[2].args[2], false, 'state=false')
+end)
+
+test('H7 a non-number netId is refused at both entry points without raising', function()
+    -- netId comes straight off a net event. Untyped, a table reaches
+    -- NetworkGetEntityFromNetworkId and raises -- console-spammable by any client.
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    falsy(BoatAnchor.Add(5, {}), 'a table netId must not anchor')
+    falsy(BoatAnchor.Add(5, '900'), 'a string netId must not anchor')
+    falsy(BoatAnchor.Remove(5, {}), 'a table netId must not unanchor')
+    equal(#spy.clientEvents, 0, 'nothing may be broadcast for a malformed netId')
 end)
 
 -- ---------------------------------------------------------------- runner

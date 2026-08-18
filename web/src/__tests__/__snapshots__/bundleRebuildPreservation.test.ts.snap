@@ -20,7 +20,7 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "config/zones.lua": "70dfe21848f14105d2a31bb384e67a0226c64e5d79f96706eb1b003dd989d160",
   "fxmanifest.lua": "a289a147e5cd154516011c744c4566ae897d91fd011a49c34f3e00169032648b",
   "server/admin.lua": "3f77eb82b8a55f408b4e903da3902c64eece7714540e1d5e0ab45466ae641831",
-  "server/boat_anchor.lua": "def6da8a2158d6760e4ae53472a6af7b738daf06d2dda16f3402999b0b85076b",
+  "server/boat_anchor.lua": "7b1b395898328f7cf28fa5140cc4f4e10a1c2ade15c039af0e146a61502e7044",
   "server/config_schema.lua": "00d86f5347740d34bc70d17686e7830d4aafa8c144c7815515047227ba1fa04d",
   "server/generator.lua": "afef86ea73987536820779c52fa1afdc64d0f7fea9a5a1ded98c9232bd109b42",
   "server/lib.lua": "9111d1edbce2a1c79fe339d8c9d402235469a2dcf975d586914b1fda23f037aa",
