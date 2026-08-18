@@ -77,7 +77,7 @@ RegisterNUICallback('reelResult', function(body, cb)
         Casting.StartDrift()   -- bobber floats free with the current behind the catch card
         SetNuiFocus(true, true)
         PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-        -- teardown happens on keep/release click
+        -- teardown happens on keep click
     elseif res and res.ok then
         endFishing(body.reason == 'snap' and 'line_broke' or 'fish_escaped', 'error')
     else
