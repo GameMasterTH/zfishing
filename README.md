@@ -28,17 +28,26 @@ auto-detected or silently downgraded at runtime.
 
 ## Install
 
-1. Add to `server.cfg` **in this order** (after your framework + oxmysql):
+1. Apply the database schema — see **Database** below — then add to `server.cfg`
+   **in this order** (after your framework + oxmysql):
    ```cfg
    ensure ox_lib
    ensure zcore_lib
    ensure zfishing
    ```
-   **Database tables are created automatically on first start** — no SQL import needed.
-   (The `sql/*.sql` files are kept only as reference for DBAs who prefer to provision
-   the schema manually.)
 2. Register the items below in your inventory.
 3. (Optional) Rebuild the UI after changing `web/src`: `cd web && npm install && npm run build`.
+
+### Database
+
+The resource does **not** create or alter schema. Apply
+`migrations/mysql/001_schema.up.sql` with your usual migration tooling before
+starting the resource for the first time; `migrations/checks/001_schema.verify.sql`
+confirms the result. `migrations/mysql/001_schema.down.sql` reverses it.
+
+On first boot the static files in `config/` are seeded into the database. After
+that **the database is the source of truth** — editing `config/fish.lua` and
+restarting will not change anything. Use the admin panel, or reseed.
 
 ### Admin access
 
@@ -67,9 +76,10 @@ do not need duplicate `server.cfg` grants.
 
 ## Admin tools
 
-Config is **DB-backed**: on first start the tables are auto-created and `config/*.lua`
-are copied into the DB as seed defaults. After that the DB is the source of truth —
-edit it live with these tools (all gated by `isAdmin` — see **Admin access** above):
+Config is **DB-backed**: on first start (once the schema is applied — see
+**Database** above) `config/*.lua` is copied into the DB as seed defaults. After
+that the DB is the source of truth — edit it live with these tools (all gated by
+`isAdmin` — see **Admin access** above):
 
 | Command | What it does |
 |---|---|
@@ -112,47 +122,25 @@ language, copy `locales/en.json` to `locales/<code>.json` and translate — the 
 picks it up on resource restart, nothing else to edit. The UI ships with a bundled
 Thai-capable font (Noto Sans Thai), so no client-side font install is needed.
 
-The ox_inventory right-click button ("Manage Rod") also follows `Config.Locale` —
-it lives in `items.lua`, a different resource, so it reads zfishing's config and
-locale files directly rather than through the NUI. See **Item definitions** below;
-changing the language needs an **ox_inventory** restart too, not just zfishing's.
-
 ## Item definitions
 
 ### ox_inventory (`ox_inventory/data/items.lua`)
 
 Rods are **usable items** — fishing starts by using one, not a proximity keybind.
 Each rod needs `client = { export = 'zfishing.useRod' }` so ox_inventory calls the
-resource's client export directly on use.
+resource's client export directly on use. `consume = 0` stops ox_inventory from
+eating the rod when the `export` fires on use.
 
-`buttons` is what puts **"Manage Rod"** on the right-click menu (attach/detach reel,
-line, hook, float). `consume = 0` stops ox_inventory from eating the rod when the
-`export` fires on use. The button's label follows zfishing's `Config.Locale` —
-`rodButtonLabel()` reads `locales/<lang>.json`'s `rig_button_label` key straight out
-of the zfishing resource (no export/start-order dependency, works even if zfishing
-hasn't started yet). Like every other `Config.Locale` change, it's read once when
-ox_inventory parses `items.lua`, so **restart ox_inventory** after changing the
-language for the button text to catch up.
+The rod-assembly menu opens with the **G** keybind in-game (see **Assembling a
+rod** below), not an inventory right-click entry — rod items don't need a
+`buttons` table.
 
 ```lua
--- rods (usable — starts fishing; right-click button opens the assembly menu)
-local function zfishingLocale()
-    local cfg = LoadResourceFile('zfishing', 'config/main.lua')
-    local lang = cfg and cfg:match("Config%.Locale%s*=%s*'([%w_%-]+)'")
-    return lang or GetConvar('ox:locale', 'en') -- Config.Locale = false -> follow the convar
-end
-local function rodButtonLabel()
-    local raw = LoadResourceFile('zfishing', ('locales/%s.json'):format(zfishingLocale()))
-    local dict = raw and json.decode(raw)
-    return (dict and dict.rig_button_label) or 'Manage Rod'
-end
-local rodButtons = {
-    { label = rodButtonLabel(), action = function(slot) TriggerEvent('zfishing:manageRod', slot) end },
-}
-['fishing_rod_common']    = { label = 'Bamboo Rod',   weight = 1000, stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' }, buttons = rodButtons },
-['fishing_rod_rare']      = { label = 'Carbon Rod',   weight = 900,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' }, buttons = rodButtons },
-['fishing_rod_epic']      = { label = 'Graphite Rod', weight = 800,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' }, buttons = rodButtons },
-['fishing_rod_legendary'] = { label = 'Master Rod',   weight = 700,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' }, buttons = rodButtons },
+-- rods (usable — starts fishing; assembly menu opens with the G keybind)
+['fishing_rod_common']    = { label = 'Bamboo Rod',   weight = 1000, stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' } },
+['fishing_rod_rare']      = { label = 'Carbon Rod',   weight = 900,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' } },
+['fishing_rod_epic']      = { label = 'Graphite Rod', weight = 800,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' } },
+['fishing_rod_legendary'] = { label = 'Master Rod',   weight = 700,  stack = false, close = true, consume = 0, client = { export = 'zfishing.useRod' } },
 -- reels / lines / hooks / floats
 ['reel_cheap']    = { label = 'Cheap Reel',    weight = 300, stack = false, close = true },
 ['reel_carbon']   = { label = 'Carbon Reel',   weight = 250, stack = false, close = true },
@@ -264,15 +252,13 @@ fitted onto the rod item before it can cast (`Config.RequireAssembly`, default
 on — toggle in the admin panel to fall back to the old "best gear you carry"
 behavior).
 
-- **Assemble/disassemble:** right-click the rod in ox_inventory ("Manage Rod"
-  button), or `/fishrig` on any inventory. The menu shows every socket, what's
-  fitted, its condition, and lets you fit spare parts from your bags or detach
-  fitted ones (detached parts keep their remaining durability).
-  - **No "Manage Rod" on right-click?** The rod entry in `ox_inventory/data/items.lua`
-    is missing `buttons = rodButtons` (see **Item definitions** above) — ox_inventory
-    caches item data in memory, so after editing the file you must **restart
-    ox_inventory**, not just the resource. `/fishrig` always works regardless of
-    `buttons`, since it doesn't depend on the item's right-click menu.
+- **Assembling a rod:** equip a fishing rod and press **G** while in equip
+  standby (before you cast) to open the rig menu — the only entry point.
+  The keybind is registered as `zfishing_rig` and can be rebound in
+  **Settings → Key Bindings → FiveM**. Once the line is in the water the menu
+  is closed and `G` does nothing. The menu shows every socket, what's fitted,
+  its condition, and lets you fit spare parts from your bags or detach fitted
+  ones (detached parts keep their remaining durability).
 - **Tradeable:** the components live inside the rod item's metadata — selling
   or giving the rod hands over the whole assembled kit. The rod tooltip lists
   what's fitted and each part's condition.
@@ -290,10 +276,10 @@ behavior).
 per-item metadata — **ox_inventory** and **qb-inventory** provide it (any framework:
 ESX/QBCore/QBox — it's the *inventory* resource that matters). The resolver pins the
 mode up front: when the pinned profile is `simple-fishing` (e.g. plain ESX native),
-assembly is explicitly disabled and `/fishrig` says so, fishing using the best gear
-you carry — there is no runtime probe and no silent metadata drop. zfishing never
-touches an inventory directly; every call goes through `zcore_lib`'s pinned runtime
-contract.
+assembly is explicitly disabled — the rig menu (G) has no rod slot to show —
+and fishing uses the best gear you carry instead; there is no runtime probe and
+no silent metadata drop. zfishing never touches an inventory directly; every
+call goes through `zcore_lib`'s pinned runtime contract.
 
 ## How it plays
 
@@ -324,7 +310,8 @@ locked, and it's rebindable in FiveM's Settings > Key Bindings > "Cancel
 fishing". Use `/zfishzone` to place zones — without at least one zone, rods
 can't be used anywhere.
 
-QA commands: `/zfish_roll [water]` samples a server roll, `/zfish_xp` grants 50 XP.
+QA commands (admin-only): `/zfish_roll [water]` samples a server roll, `/zfish_xp`
+grants 50 XP.
 
 ## Anti-cheat model
 
