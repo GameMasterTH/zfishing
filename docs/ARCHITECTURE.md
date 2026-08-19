@@ -189,11 +189,12 @@ secret: a modified client can always read its own. See §3.1.
                  'settling'   (locked BEFORE Rewards.GiveCatch is called)
                       │
                       ▼
-                     nil   (+ item granted, XP added, catch logged, rate++)
+                     nil   (+ item granted, XP added, catch logged, rate++
+                            only when the catch COMMITTED — see §4.5)
 ```
 
 **`settling` exists to close a replay window.** `Rewards.GiveCatch` does
-`AddItem` → `Progression.Save` → `MySQL.insert`, each a yield point; the claim
+`AddItem` → `Progression.SaveAwait` → `MySQL.insert.await`, each a yield point; the claim
 callback sets `s.state = 'settling'` *before* calling it. `hook` requires
 `s.state == 'hooking'` and `claim` requires `s.state == 'reeling'`, so a claim
 replayed while the reward is still settling fails that check and is refused
@@ -215,14 +216,20 @@ Because cancel can no longer rescue a stuck `settling`, the reward call is wrapp
 in `pcall`: an error raised anywhere inside `GiveCatch` would otherwise park the
 session in `settling` with nothing able to clear it and leave the player on `busy`
 for every later cast until they reconnect. A raised settlement returns
-`reason = 'settle_failed'` and still resets.
+`reason = 'settle_failed'` and still resets. That backstop is now narrow — every
+secondary effect inside `GiveCatch` guards itself (§4.5) — but it is not dead: the
+pre-commit path formats the item description from the rolled `quality`, the one
+rolled field nothing reads before settlement, so a malformed roll still raises
+there. `tests/security.test.lua` O4 pins that shape; if it ever stops raising,
+`settle_failed` becomes unreachable and this paragraph is what has to change.
 
 **Every path back to `nil`:**
 
 | Trigger | Where |
 |---|---|
-| Successful claim (through `settling`) | `zfishing:claim` success branch |
-| Reward path raised (through `settling`) → `reason = 'settle_failed'` | `zfishing:claim` success branch |
+| Committed catch (through `settling`) | `zfishing:claim` success branch |
+| Uncommitted catch — fish never reached the inventory → `reason = 'inv_full'` | `zfishing:claim` success branch |
+| Reward path raised before the commit point → `reason = 'settle_failed'` | `zfishing:claim` success branch |
 | Failed claim (escape/snap) — still `ok = true`, `fish = nil` | `zfishing:claim` |
 | Claim too fast (`elapsed < minMs * 0.9`) → `reason = 'too_fast'` | `zfishing:claim` |
 | Claim too late (`elapsed > Config.Timings.reelTimeout + 5000`) → `reason = 'timeout'` | `zfishing:claim` |
@@ -355,12 +362,30 @@ The client turns any `reason` into a locale key by prefixing `error_`, e.g.
 - `{ ok = false, reason = 'too_fast' | 'timeout' | 'inv_full' | 'settle_failed' | 'invalid_session' | 'too_many_requests' }`
 
 `too_many_requests` is the flood gate (max 3 per 3000ms), checked before the
-session lookup. Unlike `cast`, the client does **not** turn a failed claim's
-`reason` into an `error_<reason>` locale key: `client/minigame.lua`'s `reelResult`
-handler shows the generic `fish_escaped` message for every `ok = false`. The
-reasons above are wire-level and for the server log; no player-facing string is
-tied to them. `settle_failed` in particular exists so a raised reward path is
-distinguishable in the console from a genuinely full inventory. `reason == 'snap'` on a failed claim destroys the fitted line
+session lookup.
+
+**The three outcome shapes are distinct, and the client renders them
+differently.** `client/minigame.lua`'s `reelResult` handler used to have a single
+`else` arm that reported *every* `ok = false` as `fish_escaped` — telling a player
+whose inventory was full that the fish got away. Failures now map through an
+explicit `CLAIM_ERRORS` table:
+
+| `reason` | locale key |
+|---|---|
+| `inv_full` | `error_inv_full` |
+| `timeout` | `error_claim_timeout` |
+| `settle_failed` | `error_settle_failed` |
+| `too_many_requests` | `error_too_many_requests` |
+| `invalid_session` | `error_invalid_session` |
+| anything else, or no answer at all | `error_claim_failed` |
+
+Explicit rather than `'error_' .. reason`: the reasons are wire-level, not every
+one deserves a player-facing string, and a missing key renders as the raw reason
+in-game. `web/src/__tests__/claimErrorLocales.test.ts` asserts every value in that
+table plus the fallback exists and is non-blank in **both** locale files — an
+earlier pass shipped an unreachable `error_settle_failed` for exactly this reason.
+`error_settle_failed`'s wording is deliberately neutral about whether the fish was
+secured, because the backstop it reports fires on the pre-commit path. `reason == 'snap'` on a failed claim destroys the fitted line
 component (`Rig.breakLine`) and fires `zfishing:rig:notify` with `line_broke`.
 A successful claim locks the session in `settling` before the reward is granted
 — see §2.
@@ -538,7 +563,7 @@ Dispatched by a single `switch (msg.action)` in `App.tsx`.
 |---|---|---|
 | `getLocale` | — | `client/main.lua` — returns the merged `en` + active-language dict |
 | `reelEnergy` | `{ pct: 0..1 }` | `client/minigame.lua` — drives bobber distance |
-| `reelResult` | `{ success, reason, durationMs }` | `client/minigame.lua` — triggers the claim |
+| `reelResult` | `{ success, reason, durationMs }` | `client/minigame.lua` — triggers the claim; a failed claim maps through `CLAIM_ERRORS` (§3.1), never `fish_escaped` |
 | `keep` | — | `client/minigame.lua` — closes the catch card. The NUI button is labeled "Continue" (Task 7 removed the Keep/Release choice); `keep` is the only callback the card fires |
 | `rigAction` | `{ kind: 'attach'\|'detach', partType, itemName, slot }` | `client/rig.lua` |
 | `rigClose` | — | `client/rig.lua` |
@@ -691,6 +716,66 @@ inventory.** Three rules hold it up.
 
 A `sell` flood gate (max 2 per 3000ms) sits in front of all of it, so a spammed
 sale costs a table lookup rather than a full inventory sweep.
+
+**Reconciliation.** Every sale attempt mints a server-side `saleId`
+(`<src>-<gametimer>-<seq>`, never sent to the client) so lines about the same sale
+can be tied together in a console where several players are selling at once. A
+failed payout logs one summary — `saleId`, `src`, `expectedPayout`, `removed`,
+`restored`, `restoreFailed` — followed by one `CRITICAL sale reconciliation` line
+per stack that could not be handed back, carrying the item, count, metadata
+summary and expected payout. That is everything needed to make a player whole.
+There is deliberately **no** per-sale success line: a successful sale already has
+a client-visible receipt, and one line per sale would bury the CRITICAL lines. A
+DB ledger is out of scope; the console record is what an admin reconciles from.
+
+### 4.5 The catch commit boundary
+
+`Rewards.GiveCatch` returns a structured result, not a boolean:
+
+```lua
+{ ok = true,  committed = true,  warnings = { 'xp_save_failed', ... } }
+{ ok = false, committed = false, reason = 'inv_full' }
+```
+
+**The fish item entering the inventory is the commit point.** Above it, a failure
+means the player got nothing and the claim answers `inv_full`. Below it the catch
+is *committed*, and nothing may turn it back into a failure — the fish is in the
+player's bag, so answering "you caught nothing" would make the server state and
+what the player sees disagree.
+
+```
+Zfishing.AddItem(fish)
+      │
+      ├─ false ─────────────► { committed = false, reason = 'inv_full' }
+      │
+      └─ true  ─────────────► COMMITTED
+                                 ├─ XP + Progression.SaveAwait   → xp_save_failed
+                                 ├─ catch log (MySQL.insert.await)→ catch_log_failed
+                                 └─ rare loot roll + AddItem      → rare_loot_failed
+```
+
+Each secondary stage runs in its own `pcall` and must return an explicit boolean;
+`runStage` treats `not err` as failure, so a stage that forgets to return cannot
+pass silently. A failed stage appends its name to `warnings` and prints its cause;
+`server/session.lua` then prints one `catch settlement warning` line per warning
+next to the `claim settled … committed=true` line. **The client is never told.**
+
+Two cases deliberately do *not* warn: a player who dropped mid-settle (both
+persistence stages return early when the progression cache is already gone — an
+expected disconnect, and warning on it would train operators to ignore the line),
+and a 0-XP species (`ConfigSchema` clamps `xp` to `0..100000`, so 0 is reachable,
+and MySQL reports 0 changed rows for a write of identical values — `SaveAwait`
+therefore tests `affected ~= nil`, not `affected > 0`).
+
+**Persistence is awaited only here.** `Progression.Save()` stays fire-and-forget
+for `Unload` / `playerDropped` / the QA command, where nobody reads the result;
+`Progression.SaveAwait()` exists so the settlement path can tell whether the write
+landed. Before this, `pcall` around the reward path proved only that the calls were
+*dispatched*.
+
+**`Config.RateLimit` counts committed catches.** The increment moved behind
+`committed`: a claim refused with `inv_full` used to burn one of the player's
+successful catches for that minute.
 
 ---
 
@@ -1062,6 +1147,17 @@ Because it lives in `shared_scripts`, it also loads *before* `client_scripts` �
 the two Lua water-validation suites now `dofile('shared/util.lua')` before
 `client/main.lua` for that reason.
 
+**12. Only the fish item's `AddItem` may decide a catch failed.**
+`Rewards.GiveCatch`'s commit boundary (§4.5) is a rule spanning three files:
+`rewards.lua` decides `committed`, `session.lua` reports it and gates the rate
+counter on it, and `client/minigame.lua` renders the three outcome shapes.
+Anything added after the commit point — a stat write, an achievement hook, a
+webhook — belongs in a `runStage` call returning a boolean, never in the
+pre-commit path and never as an early `return false`. Moving one of those above
+the `AddItem` line, or letting one propagate a failure, silently re-creates the
+bug this boundary exists to close: a player holding a fish while being told they
+caught nothing. Groups N and O in `tests/security.test.lua` are the guard.
+
 ---
 
 ## 9. Behavioral notes that look like bugs but are not
@@ -1156,9 +1252,10 @@ the two Lua water-validation suites now `dofile('shared/util.lua')` before
   game client, a real inventory resource, or a real database.
   `docs/testing/zfishing-live-e2e-checklist.md` is the manual pass that has to be
   run on a real server before any of this is called production-verified.
-- Suite sizes as of the 2026-08-19 runtime-hardening pass: Lua **81 / 5 / 11**
+- Suite sizes as of the 2026-08-19 final-hardening pass: Lua **97 / 5 / 11**
   (`security`, `water_validation`, `water_validation_preservation`), `web/`
-  **17 test files, 66 tests** (~6s, vitest 2.1.9). The web run includes
+  **18 test files, 69 tests** (~6s, vitest 2.1.9; run it from `web/`, not the
+  repo root — the jsdom environment comes from `web/`'s own config). The web run includes
   `bundleRebuildPreservation.test.ts`, so the Lua sha256 baseline described in §8
   invariant 7 currently *matches* the files on disk — the guard is live, not
   already broken.
@@ -1188,6 +1285,53 @@ migration.
 ---
 
 ## 12. Change history
+
+### The final hardening pass — 2026-08-19
+
+The last correctness pass before live E2E. Three themes: what "a catch happened"
+means, what a player is told when it did not, and what an admin can reconstruct
+afterwards. Scope was deliberately closed after this — no minigame authority work,
+no Phase 2 features.
+
+**Partial settlement was reportable as no catch.** `Rewards.GiveCatch` returned a
+boolean and `session.lua` wrapped the whole thing in one `pcall`, so "the fish
+never reached the inventory" and "the fish is in the bag but the XP write failed"
+produced the same answer to the player. §4.5 is the fix: the fish item's `AddItem`
+is an explicit commit point, secondary effects run as guarded stages, and a stage
+failure becomes a console warning rather than a client-visible failure.
+
+**Persistence was unverifiable.** `Progression.Save()` fires `MySQL.update`
+without awaiting and returns nothing; the catch log used `MySQL.insert` the same
+way. `pcall` around them proved only that the calls were dispatched.
+`Progression.SaveAwait()` was added for the settlement path alone — `Save()` keeps
+its old behaviour for the callers that never read a result.
+
+**`Config.RateLimit` was charging for catches that never happened.** The counter
+incremented before `given` was checked, so an `inv_full` claim spent one of the
+player's successful catches for that minute.
+
+**Every claim failure said "the fish escaped".** `client/minigame.lua` had one
+`else` arm for `ok == false`. Failures now map through `CLAIM_ERRORS` (§3.1) with
+four new locale keys, and a `web/` test asserts every mapped key exists in both
+locale files — the guard against re-shipping the unreachable key the previous pass
+had to delete.
+
+**A failed sale was hard to reconcile.** Each sale attempt now carries a
+server-side `saleId`, `restoreSale` reports what it restored and what it could
+not, and an uncompensated failure logs one `CRITICAL` line per lost stack with
+everything needed to make the player whole (§4.4).
+
+**Tests.** `tests/security.test.lua` 81 → 97 (groups N, O, P — the commit
+boundary over the real settlement stack, claim integration including rate
+accounting, and sale reconciliation logging), plus
+`web/src/__tests__/claimErrorLocales.test.ts`. Mutation-checked: removing the
+commit boundary fails N3–N6, restoring the unconditional rate increment fails O2,
+dropping the CRITICAL line fails P2, warning on a missing progression cache fails
+N7, and mapping claim errors back to `fish_escaped` fails the whole `web/` locale
+file.
+
+**Still not verified on a live server.** See §10 — that is the next step, not more
+architecture.
 
 ### The runtime-hardening pass — 2026-08-19
 

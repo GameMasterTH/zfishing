@@ -341,7 +341,15 @@ grants 50 XP.
   payment itself fails the fish are put back rather than destroyed.
 - The claim's minimum-reel-time floor uses the exact drain rate the server told
   the client in the bite payload, not an assumed constant.
-- Successful catches are rate-limited (`Config.RateLimit` per minute).
+- Successful catches are rate-limited (`Config.RateLimit` per minute). Only a
+  catch the player actually received counts — a catch refused because the
+  inventory was full no longer spends one.
+- A catch is committed the moment the fish item lands in the inventory. If XP
+  persistence or the catch log fails after that, the player keeps the fish and
+  the server console gets a warning naming the stage — they are never told the
+  catch failed while holding it. A failed claim now says what went wrong
+  (inventory full, timed out, reward-processing error) instead of always
+  "the fish escaped".
 - `/zfish_xp` and `/zfish_roll` require the same admin ACE as `/zfishreload` —
   no player can self-grant XP or sample rolls.
 - Anchoring a boat requires the player be within 15m of it, with the netId

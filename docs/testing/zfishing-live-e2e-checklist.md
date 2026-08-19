@@ -58,7 +58,11 @@ Date: `________________`  ·  Tester: `________________`
 | D4 | Press **X** mid-reel | Same, immediate — this is the only way out while frozen | | |
 | D5 | Press **X** at the exact moment the catch settles (spam X during the last second of the fight) | Client tears down cleanly. The catch is either granted or not — never granted twice. A cast attempted immediately after may be refused with `error_busy` for a moment; the next one works | | |
 | D6 | Disconnect mid-fight, reconnect | No stuck session: fishing works immediately on rejoin; no orphan session in the console | | |
-| D7 | Fill the inventory completely, then land a catch | Claim answers `inv_full`; no item, no silent loss, session cleared | | |
+| D7 | Fill the inventory completely, then land a catch | Player is told the **inventory is full** (not "the fish escaped"); no item, session cleared | | |
+| D8 | Same as D7, then check `Config.RateLimit`: land `RateLimit` real catches in the same minute | The full-inventory attempt did **not** consume one of them | | |
+| D9 | Stop the database (or break the `zfishing_players` write), then land a catch | Player gets the fish and the catch card as normal; console prints `catch settlement warning … stage=xp_save_failed` | | |
+| D10 | Same with the catch log write broken | Same — fish granted, `stage=catch_log_failed` in the console only | | |
+| D11 | Land a catch with the inventory full of everything **except** one fish slot, with rare loot rolling | Fish granted; if the loot cannot fit, console warns `stage=rare_loot_failed` and the catch still succeeds | | |
 
 ## E. Selling
 
@@ -69,7 +73,8 @@ Date: `________________`  ·  Tester: `________________`
 | E3 | Spam the sell interaction as fast as possible (10+ times) | At most one payout per batch of fish; later requests answer "Slow down" / "a sale is already going through"; **no duplicate money, no duplicate fish** | | |
 | E4 | (2 players) Both sell at the same NPC simultaneously | Each is paid for their own fish only | | |
 | E5 | (simple mode) Sell | Extra notification: "Sold at standard weight — this inventory has no per-catch weight" | | |
-| E6 | If you can force a money-add failure (framework offline / account missing), sell | Message "The payment failed — your fish were returned"; **the fish are back in the inventory**; console prints nothing about a lost item | | |
+| E6 | If you can force a money-add failure (framework offline / account missing), sell | Message "The payment failed — your fish were returned"; **the fish are back in the inventory**; console logs `sale payout failed … restoreFailed=0` and **no** CRITICAL line | | |
+| E7 | Force a money-add failure **and** a full inventory so the fish cannot go back | Console logs one `CRITICAL sale reconciliation` line per lost stack with item, count, metadata and expectedPayout, sharing the `saleId` of the summary line — enough to refund by hand | | |
 
 ## F. Boats
 
