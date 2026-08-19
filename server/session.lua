@@ -260,8 +260,11 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone)
     local committed = settled and type(res) == 'table' and res.committed == true
 
-    -- the player may have dropped during the settle; playerDropped clears rate[src]
-    if rate[src] then rate[src].count = rate[src].count + 1 end
+    -- Config.RateLimit counts SUCCESSFUL catches (§3.1), so only a committed catch
+    -- spends a slot: a claim that never put a fish in the inventory must not cost
+    -- the player one. The rate table itself may be gone -- the player can drop
+    -- during the settle, and playerDropped clears rate[src].
+    if committed and rate[src] then rate[src].count = rate[src].count + 1 end
 
     print(('[zfishing] claim settled session=%s src=%s species=%s committed=%s')
         :format(s.id, src, fish.species, tostring(committed)))
