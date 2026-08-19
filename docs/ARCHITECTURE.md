@@ -26,8 +26,8 @@ and writing XP + a catch log row. The roll, the grant, and every state transitio
 are server-authoritative; the minigame *outcome* is not — see
 `docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md`.
 
-Version at time of writing: `1.0.0`. Roughly 2,700 lines of Lua and 1,500 lines of
-TypeScript/TSX source.
+Version at time of writing: `1.0.0` plus the security-hardening pass of 2026-08-19
+(§12). Roughly 2,900 lines of Lua and 1,500 lines of TypeScript/TSX source.
 
 ---
 
@@ -105,17 +105,17 @@ These are plain Lua globals, not modules. No `require`, no return-table pattern.
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `server/session.lua` | 233 | **The anti-cheat core.** Per-player session state machine; `cast`/`hook`/`claim`/`cancel` callbacks; rate limiting; server-side zone and gear resolution |
-| `server/rig.lua` | 236 | Rod-assembly metadata: read, normalize, wear, break, attach/detach callbacks |
+| `server/session.lua` | 287 | **The anti-cheat core.** Per-player session state machine; `cast`/`hook`/`claim`/`cancel` callbacks; rate limiting; server-side zone and gear resolution |
+| `server/rig.lua` | 249 | Rod-assembly metadata: read, normalize, wear, break, attach/detach callbacks |
 | `server/store.lua` | 234 | DB-backed config: seed, load, mutate, broadcast to clients; `/zfishreload` |
 | `server/config_schema.lua` | 133 | Declarative schema + clamps for every admin-editable value |
 | `server/lib.lua` | 120 | zcore_lib bridge facade; resolves and caches the pinned feature mode |
-| `server/generator.lua` | 94 | Weighted species roll, weight/quality roll, per-catch derived stats |
+| `server/generator.lua` | 96 | Weighted species roll, weight/quality roll, per-catch derived stats |
 | `server/rewards.lua` | 93 | Price formula, `GiveCatch`, rare-loot roll, `sellAll` callback |
 | `server/admin.lua` | 86 | Admin gate (`zcore_lib:IsAdmin`), config read/write callbacks, `/zfishzone` `/zfishadmin` |
 | `server/usable.lua` | 71 | Registers rods as useable items (bridge first, direct framework hook as fallback) |
-| `server/progression.lua` | 55 | XP cache, level curve, load/save, `/zfish_xp` |
-| `server/boat_anchor.lua` | 43 | Refcounted boat anchoring so two anglers on one boat don't fight |
+| `server/progression.lua` | 57 | XP cache, level curve, load/save, `/zfish_xp` |
+| `server/boat_anchor.lua` | 84 | Refcounted boat anchoring so two anglers on one boat don't fight; server-side proximity + netId validation on `Add` (§9) |
 | `server/weather.lua` | 26 | Weather/hour source with weathersync exports preferred, client report as fallback |
 | `server/validate.lua` | 25 | Thin facade over `ConfigSchema` |
 
@@ -123,7 +123,7 @@ These are plain Lua globals, not modules. No `require`, no return-table pattern.
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `client/main.lua` | 341 | Session lifecycle, use-rod entry, prompt HUD, weather reporting, zone/water gates, sell NPCs, cancel keybind, single teardown path |
+| `client/main.lua` | 352 | Session lifecycle, use-rod entry, prompt HUD, weather reporting, zone/water gates, sell NPCs, cancel keybind, single teardown path |
 | `client/casting.lua` | 215 | Cast charge bar, bobber spawn + arc flight, catenary line rendering, fight/drift/dive bobber modes |
 | `client/rig.lua` | 176 | Rod-assembly NUI menu (G keybind), attach/detach forwarding, break notifications |
 | `client/minigame.lua` | 93 | Bite handler, hook QTE, reel input streaming, claim, catch card |
@@ -944,6 +944,17 @@ until the baseline is regenerated.** This is intentional — it was built to kee
 UI-only work stream from touching gameplay code — but it will surprise anyone
 editing Lua who then runs the NUI suite.
 
+**`.gitattributes` pins `*.lua text eol=lf`, and that line is load-bearing for this
+guard.** The test hashes the *working tree*, not the committed blob. Git stores Lua
+as LF, so under `core.autocrlf=true` (the Windows default) a checkout would
+materialise CRLF and every hash would differ from the baseline — the guard would
+pass only in the one working directory where the baseline happened to be generated,
+and fail on every fresh clone. It did exactly that until 2026-08-19: a fresh
+checkout of `d548217` mismatched on ~30 of 32 files, including files nothing had
+ever edited. Pinning `eol=lf` makes checkout byte-identical to the blob on every
+platform. **Removing that `.gitattributes` line silently breaks the guard for
+everyone except whoever last regenerated the baseline.**
+
 **8. Six CSS selectors must keep the literal string `#fff` in the built bundle.**
 `web/src/__tests__/rigMenuBundleRebuild.exploration.test.ts` asserts against
 `web/dist`'s minified CSS that `.rig-menu__title`, `.rig-menu__hint`,
@@ -1052,3 +1063,82 @@ migration.
 | Change a HUD surface | `web/src/components/`, then `npm run build` in `web/` and commit `web/dist` |
 | Add an admin-editable setting | `SETTING_KEYS` in `store.lua`, `ConfigSchema.Settings`, the `getConfig` payload in `admin.lua`, and a field in `web/src/admin/SettingsTab.tsx` |
 | Add a new session validation | `server/session.lua` only — and add a matching `error_<reason>` locale key |
+
+---
+
+## 12. Change history
+
+### The security-hardening pass — 2026-08-19
+
+Prompted by an external review document that listed 20 issues. Most of that document
+turned out to be a re-labelling of §8/§9/§10 of *this* file; its five P0 security
+findings were real, it missed the most exploitable bug in the resource, and its
+headline recommendation would not have worked. What follows is what actually
+changed and why, so a reader who knew the 1.0.0 shape can find their footing.
+
+**Test harness first.** The Lua suite was red on a clean checkout — 20 of 33 passing
+— for reasons unrelated to any product defect. `tests/security.test.lua` loaded
+`server/validate.lua` without `server/config_schema.lua`, so `validate.lua`'s
+nil-guard fallback stub installed and every `Validate.*` call hit a nil field; the
+same shape applied to `server/rig.lua` and `shared/rig_rules.lua`. The two
+water-validation suites were red too, missing `GetVehiclePedIsIn` /
+`GetClosestVehicle` stubs that `getFishingBoat()` needs. All three suites are now
+green (52 / 5 / 11), which is what makes the rest of this list verifiable.
+
+One stale assertion was corrected rather than preserved: `D2` asserted
+`zfishing:rig:attach` returns `occupied` for a filled socket. That code has never
+existed — attach implements swap-on-occupied by design (§3.1).
+
+**Session identity and the reward path.** Every transition now carries a nonce.
+`cast` mints a `sessionId` and returns it; `hook`, `claim` and `cancel` take it as
+their first argument and refuse a mismatch with `invalid_session` before touching
+state. The token is *not* a secret — a modified client can read its own — so it buys
+stale-request and replay rejection and a correlation id for the settle log, nothing
+more.
+
+The claim reward path is now idempotent. Previously `claim` validated
+`state == 'reeling'`, called `Rewards.GiveCatch`, and only cleared the session
+afterwards — but `GiveCatch` does `AddItem` → `Progression.Save` → `MySQL.insert`,
+and across any of those yields a replayed claim passed the same guard and was paid
+again. The session moves to `settling` **before** `GiveCatch` is called; that
+placement is the entire fix, and §2 documents the state.
+
+**Request cost.** `Config.RateLimit` counts only *successful catches*, so cast spam
+was free while costing the server a `Generator.Roll` plus a full inventory sweep per
+request. `ZUtil.MakeRateGate` (`shared/util.lua`) now gates `cast`/`hook`/`claim`
+and the three rig callbacks ahead of any validation. The two limiters are unrelated
+and both are live — see §3.1.
+
+**Commands.** `/zfish_xp` granted 50 XP to any caller and `/zfish_roll` exposed the
+generator, neither with a permission check, so any player could level into every rod
+tier. Both now use the `zfishing.admin` ACE gate that `/zfishreload` already used.
+
+**Boat anchoring — the bug the external review missed.** `zfishing:server:anchorBoat`
+accepted an arbitrary `netId`, validating only `netId ~= 0`, then broadcast to `-1`
+so every client froze that entity. Any modified client could freeze any boat on the
+server from anywhere on the map. The review filed boat anchoring as a P2 "migrate to
+Entity StateBag" performance note, which would not have fixed it — the defect was
+missing ownership validation, not transport. `Add` now requires the player within
+15m; `Remove` deliberately does not (§9 explains why).
+
+**Duplicated constants.** §8 invariants 1 and 2 are resolved: the base drain and the
+reel timeout now ship in the bite payload from `Config.Minigame.baseDrain` and
+`Config.Timings.reelTimeout`. The claim floor also dropped a `1.7` reel-drain
+fallback that contradicted the `1.0` the payload told the client — the effective
+threshold had been roughly 35% of the true minimum reel time, and is now 90%.
+
+**UI.** Keep/Release collapsed to a single Continue button. Both had always called
+the same teardown; the fish is granted at claim time, before the card renders. A
+true release is Phase 2 work.
+
+**What did NOT change, and matters most.** The minigame outcome is still decided by
+the NUI. The server checks timing plausibility, not the fight. Tightening the
+envelope removed free headroom; it did not move authority. The design for the fix —
+a fixed-timestep contract where the server integrates and scores — is specified in
+`docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md`, including
+why the obvious approach (server-issued seed, client replay) does not work: the
+engine integrates on client-supplied `dt`, demonstrated by an identical input
+timeline yielding `success` at one `dt` and `snap` at another.
+
+Live end-to-end verification on a real FiveM server still has not been run — see §10.
+
