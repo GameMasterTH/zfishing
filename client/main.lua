@@ -26,10 +26,10 @@ RegisterNUICallback('getLocale', function(_, cb)
 end)
 
 -- ---------------------------------------------------------------- weather
-local WEATHERS = {
-    'CLEAR','EXTRASUNNY','CLOUDS','OVERCAST','RAIN','CLEARING','THUNDER',
-    'SMOG','FOGGY','XMAS','SNOW','SNOWLIGHT','BLIZZARD','HALLOWEEN','NEUTRAL',
-}
+-- The name list lives in shared/util.lua because server/weather.lua whitelists
+-- the report against the same table: a list here that the server did not know
+-- about would be dropped silently and freeze the weather bonus at its fallback.
+local WEATHERS = ZUtil.WEATHER_TYPES
 local weatherByHash = {}
 for _, w in ipairs(WEATHERS) do weatherByHash[GetHashKey(w)] = w end
 
@@ -304,6 +304,10 @@ local function sellFish()
     local res = lib.callback.await('zfishing:sellAll', false)
     if res and res.ok then
         lib.notify({ description = locale('sold'):format(res.total), type = 'success' })
+    elseif res and res.reason then
+        -- a refused sale (throttled, one already running, payout failed) is not
+        -- "you have no fish" -- same error_<reason> mapping the cast path uses
+        lib.notify({ description = locale('error_' .. res.reason), type = 'error' })
     else
         lib.notify({ description = locale('no_fish'), type = 'error' })
     end

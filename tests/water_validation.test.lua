@@ -176,6 +176,7 @@ end
 local function loadClient(opts)
     installHost(opts)
     Config = baseConfig()
+    dofile('shared/util.lua')   -- shared_scripts load before client_scripts (fxmanifest)
     dofile('client/main.lua')
     local entry = EXPORTS['useRod'] or NETEVENTS['zfishing:client:useRod']
     truthy(entry, 'startRodUse must be exported/bound by client/main.lua')

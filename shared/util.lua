@@ -47,3 +47,18 @@ function ZUtil.MakeRateGate(limits)
     function gate.forget(src) hits[src] = nil end
     return gate
 end
+
+-- Canonical GTA weather names, shared so the client's report and the server's
+-- whitelist can never drift. client/main.lua reports one of these every 60s;
+-- server/weather.lua accepts only a name from this list. A server-side list
+-- narrower than what the client can send would silently freeze the weather
+-- bonus at its fallback instead of failing loudly.
+ZUtil.WEATHER_TYPES = {
+    'CLEAR','EXTRASUNNY','CLOUDS','OVERCAST','RAIN','CLEARING','THUNDER',
+    'SMOG','FOGGY','XMAS','SNOW','SNOWLIGHT','BLIZZARD','HALLOWEEN','NEUTRAL',
+}
+
+local weatherSet = {}
+for _, w in ipairs(ZUtil.WEATHER_TYPES) do weatherSet[w] = true end
+
+function ZUtil.IsWeather(name) return weatherSet[name] == true end

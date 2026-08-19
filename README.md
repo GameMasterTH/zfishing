@@ -329,11 +329,16 @@ grants 50 XP.
 - A claim locks the session in a `settling` state **before** the reward is
   granted, so a claim replayed while the inventory/DB write is still in
   flight is refused instead of paid out twice.
-- A per-action flood gate sits in front of `cast`/`hook`/`claim` and the rig
-  callbacks, rejecting a burst of requests before any inventory sweep or fish
-  roll runs. This is separate from `Config.RateLimit` below — that one throttles
-  the catch *economy* (successful catches only); the flood gate throttles raw
-  request rate regardless of outcome.
+- A per-action flood gate sits in front of `cast`/`hook`/`claim`, `sellAll`, the
+  rig callbacks, the boat-anchor request, the weather report and the config-sync
+  request, rejecting a burst before any inventory sweep or fish roll runs. This is
+  separate from `Config.RateLimit` below — that one throttles the catch *economy*
+  (successful catches only); the flood gate throttles raw request rate regardless
+  of outcome. Cancelling (**X**) and releasing a boat anchor are never throttled:
+  they are the ways out.
+- Selling is serialised per player and paid only for fish that actually left the
+  inventory. Two sell requests arriving together cannot both be paid, and if the
+  payment itself fails the fish are put back rather than destroyed.
 - The claim's minimum-reel-time floor uses the exact drain rate the server told
   the client in the bite payload, not an assumed constant.
 - Successful catches are rate-limited (`Config.RateLimit` per minute).

@@ -134,9 +134,21 @@ end
 function Store.SyncTo(src) TriggerClientEvent('zfishing:store:sync', src, clientPayload()) end
 function Store.Broadcast() TriggerClientEvent('zfishing:store:sync', -1, clientPayload()) end
 
+-- An honest client asks once, 1s after its own start (client/store.lua). The
+-- window is deliberately generous — a resource restart or a rejoin legitimately
+-- re-asks — and a throttled request is simply dropped: no log, no disconnect, and
+-- nothing about a fishing session depends on it.
+local syncGate = ZUtil.MakeRateGate({
+    request = { max = 3, window = 10000 },
+})
+
 RegisterNetEvent('zfishing:store:request', function()
-    Store.SyncTo(source)
+    local src = source
+    if not syncGate.allow(src, 'request') then return end
+    Store.SyncTo(src)
 end)
+
+AddEventHandler('playerDropped', function() syncGate.forget(source) end)
 
 RegisterCommand('zfishreload', function(src)
     if not exports.zcore_lib:IsAdmin(src, 'zfishing.admin') then return end

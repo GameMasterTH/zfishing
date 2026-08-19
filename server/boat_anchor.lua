@@ -1,12 +1,17 @@
 BoatAnchor = {}
 local boatAnchors = {} -- [netId] = { count = N, players = { [src] = true } }
 
--- The client probes for a boat within 3.5m (client/main.lua:109) and may then
--- attach the ped to the deck. 15m of server-side allowance covers standing at
--- the bow of the largest boats and any position desync, while still refusing
--- the actual attack: anchoring an arbitrary netId from across the map. Without
--- this, any client can freeze any boat on the server -- the broadcast at the
--- bottom of this file reaches every player.
+-- 15m, and it STAYS 15m. The obvious tightening -- "the client only probes 3.5m,
+-- so 5-8m is plenty" -- reads only one of getFishingBoat()'s three branches
+-- (client/main.lua:103-114). The second branch is GetVehiclePedIsIn(ped, true),
+-- the LAST vehicle, which matches at any distance: a player who was seated in a
+-- Tug or a Marquis, stood up and walked to the stern is 8-10m from the vehicle
+-- ORIGIN and server-side GetVehiclePedIsIn(ped, false) returns 0 for them, so no
+-- seat check rescues that case either. This resource carries no boat-dimension
+-- data to pick a tighter number from, and the client attaches the ped to the deck
+-- whether or not the server accepts the anchor -- a refusal strands a ped attached
+-- to a boat nobody froze. 15m still refuses the actual attack (an arbitrary netId
+-- from across the map); the checks that got tightened are the ones below it.
 --
 -- Proximity, NOT seat occupancy: GetVehiclePedIsIn returns 0 for a player
 -- standing on the deck, which is a supported fishing position, and the anchor
@@ -20,10 +25,22 @@ local function validNetId(netId)
     return type(netId) == 'number' and netId ~= 0
 end
 
-local function playerNearVehicle(src, netId)
-    if not validNetId(netId) then return false end
+-- Resolves the netId to an entity that is actually a boat. GetEntityType == 2
+-- (vehicle) and GetVehicleType == 'boat' are both server natives on the shipped
+-- artifact (citizen/scripting/lua/natives_server.lua). This is hygiene rather
+-- than the security boundary -- SetBoatAnchor on a car is inert client-side --
+-- but it keeps a ped netId, an object netId or a car out of the refcount table
+-- and out of the broadcast entirely.
+local function resolveBoat(netId)
+    if not validNetId(netId) then return nil end
     local veh = NetworkGetEntityFromNetworkId(netId)
-    if not veh or veh == 0 or not DoesEntityExist(veh) then return false end
+    if not veh or veh == 0 or not DoesEntityExist(veh) then return nil end
+    if GetEntityType(veh) ~= 2 then return nil end
+    if GetVehicleType(veh) ~= 'boat' then return nil end
+    return veh
+end
+
+local function playerNearVehicle(src, veh)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return false end
     local p, v = GetEntityCoords(ped), GetEntityCoords(veh)
@@ -31,8 +48,23 @@ local function playerNearVehicle(src, netId)
     return (dx * dx + dy * dy + dz * dz) <= ANCHOR_RANGE_SQ
 end
 
+-- One anchor per player, matching the client exactly: client/main.lua tracks a
+-- single currentBoatNetId, so an honest player never holds two. Without this a
+-- caller inside a marina could hold every boat within 15m frozen at once; with
+-- it, the reach of a modified client is capped at one boat at a time -- the same
+-- reach it already has with its own.
+local function holdsOtherAnchor(src, netId)
+    for held, data in pairs(boatAnchors) do
+        if held ~= netId and data.players[src] then return true end
+    end
+    return false
+end
+
 function BoatAnchor.Add(src, netId)
-    if not playerNearVehicle(src, netId) then return false end
+    local veh = resolveBoat(netId)
+    if not veh then return false end
+    if not playerNearVehicle(src, veh) then return false end
+    if holdsOtherAnchor(src, netId) then return false end
     boatAnchors[netId] = boatAnchors[netId] or { count = 0, players = {} }
     if not boatAnchors[netId].players[src] then
         boatAnchors[netId].players[src] = true

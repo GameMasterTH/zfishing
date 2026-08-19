@@ -247,3 +247,8 @@ lib.callback.register('zfishing:rig:detach', function(src, slot, partType)
     writeMeta(src, slot, s.name, meta)
     return { ok = true }
 end)
+
+-- The rig gate keeps a per-src bucket like session.lua's does; drop it with the
+-- player so a long-running server does not accumulate one entry per src that ever
+-- opened the rig menu.
+AddEventHandler('playerDropped', function() gate.forget(source) end)

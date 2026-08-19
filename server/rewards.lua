@@ -46,26 +46,40 @@ function Rewards.GiveCatch(src, fish, zoneName)
     return true
 end
 
--- Sells every fish_* item the player carries. Pricing follows the pinned mode:
+-- One sale at a time, per player. Every step below crosses the zcore_lib resource
+-- boundary and can yield, so two sellAll requests arriving together would each
+-- price the same fish and each reach AddMoney. The lock is taken before the first
+-- inventory read and released on every exit: success, nothing to sell, a failed
+-- payout, a raised error (the pcall in the callback) and a mid-sale disconnect
+-- (the playerDropped handler at the bottom of this file).
+local selling = {}
+
+-- Selling is not on any hot path -- the NPC is a manual interaction -- so the
+-- window only has to be loose enough that a double-click is never punished.
+local gate = ZUtil.MakeRateGate({
+    sell = { max = 2, window = 3000 },
+})
+
+-- Removes every fish the player carries and reports what ACTUALLY left the
+-- inventory. Price is accumulated only inside the `remove succeeded` branch, so
+-- the payout can never include a fish that is still in the player's bag.
+-- Pricing follows the pinned mode:
 --   * enhanced-rig: each slot is priced from its own per-instance metadata
 --   * simple-fishing: no per-instance metadata, so fish are priced at the
 --     species-average weight / 3-star quality and the player is told explicitly.
 -- All inventory access goes through the pinned runtime contract -- no direct
 -- vendor inventory export and no GetResourceState auto-detect.
-lib.callback.register('zfishing:sellAll', function(src)
-    if Zfishing.Blocked() then
-        Zfishing.Notify(src, 'Fishing is unavailable right now', 'error')
-        return { ok = false, total = 0 }
-    end
-
-    local total = 0
+local function collectSale(src)
+    local total, removed = 0, {}
     if Zfishing.Enhanced() then
         for species in pairs(Config.Fish) do
             local item = 'fish_'..species
             for _, slot in ipairs(Zfishing.Search(src, { item })) do
-                local price = Rewards.Price(species, slot.metadata) * (slot.count or 1)
-                if price > 0 and Zfishing.RemoveItemSlot(src, item, slot.count or 1, slot.slot) then
+                local count = slot.count or 1
+                local price = Rewards.Price(species, slot.metadata) * count
+                if price > 0 and Zfishing.RemoveItemSlot(src, item, count, slot.slot) then
                     total = total + price
+                    removed[#removed + 1] = { item = item, count = count, metadata = slot.metadata }
                 end
             end
         end
@@ -78,16 +92,66 @@ lib.callback.register('zfishing:sellAll', function(src)
                 local price = Rewards.Price(species, { weight = avgWeight, quality = 3 }) * count
                 if Zfishing.RemoveItem(src, item, count) then
                     total = total + price
+                    removed[#removed + 1] = { item = item, count = count }
                 end
             end
         end
     end
+    return total, removed
+end
 
-    if total > 0 then
-        Zfishing.AddMoney(src, total, 'fish-sale')
-        if Zfishing.Simple() then
-            Zfishing.Notify(src, 'Sold at standard weight -- this inventory has no per-catch weight', 'inform')
+-- The fish are already out of the inventory when the payout is attempted, so a
+-- failed AddMoney must hand them back -- the resource never destroys an item
+-- silently (same rule as rig attach/detach). A restore that itself fails is the
+-- one case worth shouting about in the console: the player has lost fish.
+local function restoreSale(src, removed)
+    for _, r in ipairs(removed) do
+        if not Zfishing.AddItem(src, r.item, r.count, r.metadata) then
+            print(('[zfishing] SALE PAYOUT FAILED and %s x%s could not be returned to src=%s')
+                :format(r.item, tostring(r.count), tostring(src)))
         end
     end
-    return { ok = total > 0, total = total }
+end
+
+local function runSale(src)
+    local total, removed = collectSale(src)
+    if total <= 0 then return { ok = false, total = 0 } end
+
+    if not Zfishing.AddMoney(src, total, 'fish-sale') then
+        restoreSale(src, removed)
+        return { ok = false, total = 0, reason = 'payout_failed' }
+    end
+
+    if Zfishing.Simple() then
+        Zfishing.Notify(src, 'Sold at standard weight -- this inventory has no per-catch weight', 'inform')
+    end
+    return { ok = true, total = total }
+end
+
+lib.callback.register('zfishing:sellAll', function(src)
+    if not gate.allow(src, 'sell') then return { ok = false, total = 0, reason = 'too_many_requests' } end
+    if Zfishing.Blocked() then
+        Zfishing.Notify(src, 'Fishing is unavailable right now', 'error')
+        return { ok = false, total = 0 }
+    end
+    if selling[src] then return { ok = false, total = 0, reason = 'sale_busy' } end
+
+    selling[src] = true
+    local ok, res = pcall(runSale, src)
+    selling[src] = nil
+
+    if not ok then
+        print(('[zfishing] sellAll errored for src=%s: %s'):format(tostring(src), tostring(res)))
+        return { ok = false, total = 0, reason = 'sale_failed' }
+    end
+    return res
+end)
+
+-- A player who drops mid-sale never returns through the pcall above, so the lock
+-- is cleared here too; without this the src would refuse every sale after a
+-- reconnect onto the same server id.
+AddEventHandler('playerDropped', function()
+    local src = source
+    selling[src] = nil
+    gate.forget(src)
 end)

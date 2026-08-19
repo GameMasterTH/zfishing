@@ -197,20 +197,32 @@ secret: a modified client can always read its own. See §3.1.
 callback sets `s.state = 'settling'` *before* calling it. `hook` requires
 `s.state == 'hooking'` and `claim` requires `s.state == 'reeling'`, so a claim
 replayed while the reward is still settling fails that check and is refused
-rather than paid twice. `cancel` is the one callback that does **not** check
-`s.state` — it matches only on `sessionId` and always resets — so a `cancel`
-racing in during the settle window can still null out `sessions[src]` early.
-That is harmless: `Rewards.GiveCatch(src, fish, zone)` was already called with
-`fish` and `zone` captured as locals, not re-read from the session table, so an
-early reset cannot touch a reward already in flight. Nothing moves a session
-out of `settling` into another live state — from there it only ever proceeds
-to `nil`.
+rather than paid twice.
+
+**`settling` also owns the session against `cancel`.** `cancel` used to match on
+`sessionId` alone and always reset, so a cancel racing in during the settle window
+nulled `sessions[src]` early. No reward was ever double-paid by that —
+`Rewards.GiveCatch(src, fish, zone)` is called with `fish` and `zone` captured as
+locals, not re-read from the session table — but it let the player start a *new*
+cast while the previous reward was still in flight. `cancel` now answers
+`{ ok = true }` for a session in `settling` **without** resetting it, so the client
+still runs its single teardown path while the server keeps the slot until the
+reward path clears it. The visible cost is a short window in which a cast right
+after that cancel returns `busy`. Nothing moves a session out of `settling` into
+another live state — from there it only ever proceeds to `nil`.
+
+Because cancel can no longer rescue a stuck `settling`, the reward call is wrapped
+in `pcall`: an error raised anywhere inside `GiveCatch` would otherwise park the
+session in `settling` with nothing able to clear it and leave the player on `busy`
+for every later cast until they reconnect. A raised settlement returns
+`reason = 'settle_failed'` and still resets.
 
 **Every path back to `nil`:**
 
 | Trigger | Where |
 |---|---|
 | Successful claim (through `settling`) | `zfishing:claim` success branch |
+| Reward path raised (through `settling`) → `reason = 'settle_failed'` | `zfishing:claim` success branch |
 | Failed claim (escape/snap) — still `ok = true`, `fish = nil` | `zfishing:claim` |
 | Claim too fast (`elapsed < minMs * 0.9`) → `reason = 'too_fast'` | `zfishing:claim` |
 | Claim too late (`elapsed > Config.Timings.reelTimeout + 5000`) → `reason = 'timeout'` | `zfishing:claim` |
@@ -340,10 +352,15 @@ The client turns any `reason` into a locale key by prefixing `error_`, e.g.
 
 - `{ ok = true, fish = { label, weight, quality, species } }` — caught
 - `{ ok = true, fish = nil }` — legitimate escape or snap
-- `{ ok = false, reason = 'too_fast' | 'timeout' | 'inv_full' | 'invalid_session' | 'too_many_requests' }`
+- `{ ok = false, reason = 'too_fast' | 'timeout' | 'inv_full' | 'settle_failed' | 'invalid_session' | 'too_many_requests' }`
 
 `too_many_requests` is the flood gate (max 3 per 3000ms), checked before the
-session lookup. `reason == 'snap'` on a failed claim destroys the fitted line
+session lookup. Unlike `cast`, the client does **not** turn a failed claim's
+`reason` into an `error_<reason>` locale key: `client/minigame.lua`'s `reelResult`
+handler shows the generic `fish_escaped` message for every `ok = false`. The
+reasons above are wire-level and for the server log; no player-facing string is
+tied to them. `settle_failed` in particular exists so a raised reward path is
+distinguishable in the console from a genuinely full inventory. `reason == 'snap'` on a failed claim destroys the fitted line
 component (`Rig.breakLine`) and fires `zfishing:rig:notify` with `line_broke`.
 A successful claim locks the session in `settling` before the reward is granted
 — see §2.
@@ -352,11 +369,27 @@ Note: `reelDurationMs` is *sent by the client but not used* — the server measu
 elapsed time itself from `s.reelStart`.
 
 **`zfishing:cancel(sessionId: string) → { ok, reason? }`** — `reason =
-'invalid_session'` on a bad token; otherwise an unconditional session reset.
-Deliberately **not** behind the flood gate — cancel is the "bail out" escape
-hatch (see §3.5 / §9) and must never be throttled.
+'invalid_session'` on a bad token. In `waiting` / `hooking` / `reeling` it resets
+the session immediately. In `settling` it answers `{ ok = true }` **without**
+resetting: the reward path owns the session until it finishes (§2). Deliberately
+**not** behind the flood gate — cancel is the "bail out" escape hatch (see §3.5 /
+§9) and must never be throttled.
 
-**`zfishing:sellAll() → { ok: boolean, total: number }`** — see §4.4.
+**`zfishing:sellAll() → { ok: boolean, total: number, reason? }`**
+
+| Check | reason |
+|---|---|
+| per-action flood gate (`sell`: max 2 per 3000ms) | `too_many_requests` |
+| `Zfishing.Blocked()` — runtime profile unavailable (also notifies server-side) | *(no reason field)* |
+| a sale for this player is already in flight | `sale_busy` |
+| nothing sold — the player carries no priced fish | *(no reason field)* |
+| `Zfishing.AddMoney` refused; every removed fish was handed back | `payout_failed` |
+| the sale raised (adapter error); the lock was released | `sale_failed` |
+
+`{ ok = true, total = <sum> }` on success. `total` is always `0` on any failure
+branch. The two reasonless branches keep the pre-existing client contract: the
+sell NPC shows "you have no fish to sell" only when the server named no reason.
+See §4.4 for the locking and payout rules.
 
 **`zfishing:rig:get(slot: number) → RigView | nil`**
 
@@ -450,11 +483,31 @@ global pace, or vice versa — changes the wrong thing.
 
 **Client → server**
 
-| Event | Payload |
-|---|---|
-| `zfishing:reportWeather` | `weather:string, hour:number` — low trust by design, bonuses only |
-| `zfishing:store:request` | — (sent once, 1s after client start) |
-| `zfishing:server:anchorBoat` / `:unanchorBoat` | `netId` |
+| Event | Payload | Gate |
+|---|---|---|
+| `zfishing:reportWeather` | `weather:string, hour:number` — low trust by design, bonuses only | max 3 per 60000ms |
+| `zfishing:store:request` | — (sent once, 1s after client start) | max 3 per 10000ms |
+| `zfishing:server:anchorBoat` | `netId` | max 5 per 5000ms |
+| `zfishing:server:unanchorBoat` | `netId` | **none, deliberately** |
+
+Every one of these is cheap per request, which is exactly why an ungated one is
+worth flooding — `store:request` rebuilds the whole zone payload, `anchorBoat`
+resolves an entity and can broadcast to `-1`. A throttled request is dropped
+silently: no disconnect, no log line, and no effect on a fishing session.
+
+`unanchorBoat` is ungated for the same reason `cancel` is: it is the release path.
+A throttled unanchor would leave a boat frozen for good, because `client/main.lua`
+nils `currentBoatNetId` unconditionally and never retries. Flooding it costs one
+table lookup and broadcasts nothing unless the caller actually holds a reference to
+that boat (§9).
+
+**`reportWeather` is validated, not merely gated.** It is the only client-supplied
+value the server *keeps*. `weather` must be a name in `ZUtil.WEATHER_TYPES` (the
+same table `client/main.lua` reports from — §8 invariant 11) and `hour` a number in
+`0..23`. Anything else — `nil`, a table, a string hour, `NaN`, `±inf`, a negative
+hour, `24`, an unknown weather name — is dropped, leaving the previous state in
+place. The old code did `math.floor(hour) % 24` on whatever arrived, which stored
+`-nan` as the hour for an infinite input.
 
 **Client-internal**
 
@@ -612,6 +665,32 @@ parts keep wearing.
   the species-average weight `(min + max) / 2` and quality 3, and the player is
   explicitly told: *"Sold at standard weight — this inventory has no per-catch
   weight"*.
+
+**The sale invariant: money paid ≤ the value of the fish that actually left the
+inventory.** Three rules hold it up.
+
+1. **Remove first, pay once, from the removals.** Price is accumulated only inside
+   the branch where `RemoveItemSlot` / `RemoveItem` returned true, so a slot the
+   inventory refuses is never paid for and stays in the bag. (This part was already
+   correct before this pass; it is written down here because it looks like the sort
+   of thing that gets "simplified" into a sum-then-remove loop.)
+2. **A failed payout returns the fish.** `Zfishing.AddMoney`'s result used to be
+   discarded, so a refused payout removed the fish, paid nothing, and still reported
+   `ok`. The sale now records what it removed (item, count, metadata) and re-adds
+   every entry when the payout fails, then answers `payout_failed`. A restore that
+   itself fails is printed to the console — that is the one case where a player has
+   lost fish. The resource never destroys an item silently.
+3. **One sale at a time per player.** Every step crosses the `zcore_lib` resource
+   boundary and can yield, so two `sellAll` requests arriving together would each
+   price the same fish and each reach `AddMoney`. A `selling[src]` lock is taken
+   before the first inventory read; the second request gets `sale_busy`. The lock is
+   released on **every** exit — success, empty bag, failed payout, a raised error
+   (the callback wraps the sale in `pcall` and answers `sale_failed`), and a
+   mid-sale disconnect (`playerDropped` in `server/rewards.lua`, because an
+   abandoned callback coroutine never returns through the `pcall`).
+
+A `sell` flood gate (max 2 per 3000ms) sits in front of all of it, so a spammed
+sale costs a table lookup rather than a full inventory sweep.
 
 ---
 
@@ -971,6 +1050,18 @@ output is committed.
 The RAF loop writes tension and energy values every frame. A blanket transition on
 those elements makes the displayed value visibly lag the engine.
 
+**11. The weather name list is one shared table, in `shared/util.lua`.**
+`ZUtil.WEATHER_TYPES` is what `client/main.lua` builds its `weatherByHash` lookup
+from *and* what `server/weather.lua` whitelists an incoming report against. Two
+copies would drift in the direction that fails silently: a server list narrower
+than the client's drops honest reports and freezes the weather bonus at the
+fallback with nothing in the log. Adding a weather name means adding it here, once.
+`tests/security.test.lua` K4 walks the whole table through the real event handler.
+
+Because it lives in `shared_scripts`, it also loads *before* `client_scripts` —
+the two Lua water-validation suites now `dofile('shared/util.lua')` before
+`client/main.lua` for that reason.
+
 ---
 
 ## 9. Behavioral notes that look like bugs but are not
@@ -991,12 +1082,38 @@ those elements makes the displayed value visibly lag the engine.
   from the same boat both hold a reference; the anchor releases only when the last
   one leaves. The sync event goes to `-1` (all clients) because boat state must
   agree across the session.
+- **`BoatAnchor.Add` authorizes on four things, and 15m is one of them.** In
+  order: the `netId` is a number and resolves to an existing entity; that entity
+  is a vehicle (`GetEntityType == 2`) and a boat (`GetVehicleType == 'boat'` —
+  both are server natives on the shipped artifact); the caller's ped is within
+  **15m**; and the caller holds no *other* anchor. The type pair is hygiene
+  rather than the security boundary — `SetBoatAnchor` on a car is inert
+  client-side — but it keeps ped, object and car netIds out of the refcount table
+  and out of the broadcast. The one-anchor rule is the real tightening: it caps a
+  modified client at freezing one boat at a time, which is the same reach an
+  honest client has (`client/main.lua` tracks a single `currentBoatNetId`).
+  Residual, and accepted: two boats moored within 15m of each other are still
+  interchangeable to a modified client, which can freeze *a* neighbouring boat —
+  just not several, and not one across the map.
+- **The 15m radius is not padding, and tightening it would break deck fishing.**
+  The tempting argument is "the client only probes 3.5m
+  (`GetClosestVehicle`), so 5–8m is plenty" — that reads one of
+  `getFishingBoat()`'s three branches. The second is
+  `GetVehiclePedIsIn(ped, true)`, the **last** vehicle, which matches at any
+  distance: a player who was seated in a Tug or a Marquis, stood up and walked to
+  the stern is 8–10m from the vehicle *origin*, and server-side
+  `GetVehiclePedIsIn(ped, false)` returns `0` for them, so no seat check rescues
+  that case either. This resource carries no boat-dimension data to pick a
+  tighter number from, and the client attaches the ped to the deck whether or not
+  the server accepts the anchor — a refusal strands a ped attached to a boat
+  nobody froze. `tests/security.test.lua` H10 pins 10m as *allowed* so a future
+  tightening trips a test instead of a player.
 - **Boat anchoring is proximity-checked on `Add` but deliberately not on
-  `Remove`.** `BoatAnchor.Add` (`server/boat_anchor.lua`) requires the caller
-  within 15m of the target boat before granting a reference; `BoatAnchor.Remove`
-  does not re-check distance, and that is not a lapsed guard. `players[src]`
+  `Remove`.** `BoatAnchor.Remove`
+  does not re-check distance or entity type, and that is not a lapsed guard.
+  `players[src]`
   membership in a boat's anchor record is a capability only obtainable by
-  already having passed `Add`'s proximity check, so a remote `Remove` call can
+  already having passed every check in `Add`, so a remote `Remove` call can
   at most release the one reference the caller legitimately acquired — there is
   no capability to gate. Proximity-checking `Remove` too would instead strand a
   boat frozen forever the moment a player dies while fishing, respawns at a
@@ -1037,10 +1154,14 @@ those elements makes the displayed value visibly lag the engine.
   `water_validation_preservation.test.lua`); the NUI side by vitest +
   `@testing-library/react` + fast-check under `web/`. Neither exercises a real
   game client, a real inventory resource, or a real database.
-- The `web/` suite is currently green: **17 test files, 66 tests passing** (~6s,
-  vitest 2.1.9). That includes `bundleRebuildPreservation.test.ts`, so the Lua
-  sha256 baseline described in §8 invariant 7 currently *matches* the files on
-  disk — the guard is live, not already broken.
+  `docs/testing/zfishing-live-e2e-checklist.md` is the manual pass that has to be
+  run on a real server before any of this is called production-verified.
+- Suite sizes as of the 2026-08-19 runtime-hardening pass: Lua **81 / 5 / 11**
+  (`security`, `water_validation`, `water_validation_preservation`), `web/`
+  **17 test files, 66 tests** (~6s, vitest 2.1.9). The web run includes
+  `bundleRebuildPreservation.test.ts`, so the Lua sha256 baseline described in §8
+  invariant 7 currently *matches* the files on disk — the guard is live, not
+  already broken.
 - The rod-tip anchor offset in `client/anim.lua` (`TIP_OFFSET`) is documented as
   needing live tuning via a debug command that ships disabled.
 
@@ -1067,6 +1188,65 @@ migration.
 ---
 
 ## 12. Change history
+
+### The runtime-hardening pass — 2026-08-19
+
+A second pass over the same surface, on request. It closed the money path, gated
+the remaining cheap events, tightened boat anchoring where tightening was actually
+safe, and made the settlement lifecycle explicit. It deliberately did **not** touch
+the minigame authority gap (below), add caches, or re-tune the zone-distance math.
+
+**Selling could pay for fish it did not sell — the other way round.** Two things
+were wrong and one thing was already right. Already right: price was only ever
+accumulated inside a successful removal, in both modes, so the "removed failed but
+paid anyway" shape never existed (`server/rewards.lua`). Wrong: `Zfishing.AddMoney`
+returned a boolean that was discarded, so a refused payout removed every fish, paid
+nothing, and still answered `ok`. Also wrong: nothing serialised two overlapping
+`sellAll` calls, and every step of a sale yields. Both are fixed under §4.4 — a
+per-player `selling` lock released on all five exit paths, a `sell` flood gate, and
+a restore-on-failed-payout that hands back item, count and metadata.
+
+**The last ungated client events.** `store:request`, `reportWeather` and
+`anchorBoat` now sit behind `ZUtil.MakeRateGate` (§3.2). `unanchorBoat` stays
+ungated on purpose, for the same reason `cancel` does. `reportWeather` also gained
+validation: it is the only client-supplied value the server keeps, and
+`math.floor(hour) % 24` on an infinite input used to store `-nan` as the hour.
+
+**Boat anchoring, part two.** `Add` now also requires a real vehicle, a boat, and
+that the caller holds no other anchor; the 15m radius was evaluated for reduction
+to 5–8m and deliberately **kept**, because `getFishingBoat()`'s last-vehicle branch
+matches at any distance and the client attaches the ped regardless of the server's
+answer. §9 carries the full reasoning and H10 pins 10m as allowed so a future
+tightening trips a test.
+
+**Settlement lifecycle.** `cancel` no longer frees a session in `settling` — it
+answers `ok` so the client tears down, and the reward path keeps the slot until it
+finishes (§2). That removed the only escape from a stuck `settling`, so the reward
+call is now wrapped in `pcall` and always resets, answering `settle_failed`.
+
+**Cleanup.** `server/rig.lua`'s gate never dropped its per-src buckets; it and the
+two new gates now clear on `playerDropped`, alongside the `selling` lock.
+
+**Tests.** `tests/security.test.lua` grew from 52 to 81: group H gained the entity
+type / boat type / one-anchor / refcount / disconnect cases and the 10m allowance
+pin, plus new groups I (selling: races driven as coroutines, partial removal
+failure, failed payout with the fish asserted back in the bag, lock release after
+both a failure and a raised error, the flood gate, simple mode), J (cancel in every
+state, cancel during settling, replayed claim after that cancel, a raised
+settlement), K (weather validation and gating, the full `ZUtil.WEATHER_TYPES`
+round trip, `store:request` gating) and L (the anchor gate through the real net
+event — every group H test calls `BoatAnchor.Add` directly and would miss it —
+plus proof that `unanchorBoat` is *not* gated). Each new guard was
+mutation-checked: the guard was reverted one at a time and the intended test
+failed each time.
+
+One harness trap worth knowing before adding more: `installHost` records event
+handlers in a map keyed by name, so the last `AddEventHandler('playerDropped', …)`
+wins. Under `loadSession` that is session.lua's (rig.lua is `dofile`'d first and
+its handler is discarded), which is why the rig-gate cleanup test D4b goes through
+`loadRig` instead.
+
+**Still not verified on a live server.** See §10.
 
 ### The security-hardening pass — 2026-08-19
 

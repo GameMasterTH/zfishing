@@ -444,7 +444,10 @@ local function makeZfishing(state)
         calls.addItem = calls.addItem + 1
         if state.addFails then return false end
         inv[src] = inv[src] or {}
-        local slot = (#inv[src]) + 100
+        -- first free slot from 100 up: `#inv[src] + 100` returned the same slot
+        -- twice for a sparse table, so two adds in a row overwrote each other
+        local slot = 100
+        while inv[src][slot] do slot = slot + 1 end
         inv[src][slot] = { name = item, count = count, metadata = meta }
         return true
     end
@@ -557,6 +560,20 @@ test('D3b rig:get gate rejection returns nil, not a truthy err table', function(
     } } })
     for _ = 1, 10 do CB['zfishing:rig:get'](5, 3) end
     equal(CB['zfishing:rig:get'](5, 3), nil, 'a gate-rejected rig:get must stay nil, matching the no-rod contract')
+end)
+
+test('D4b playerDropped drops the rig gate bucket', function()
+    -- loadRig loads rig.lua on its own, so EVENTS['playerDropped'] is rig's handler
+    -- here; under loadSession the later dofile of session.lua would overwrite it.
+    loadRig({ mode = 'enhanced', inv = { [5] = {
+        [3] = { name = 'fishing_rod_common', count = 1, metadata = { parts = {}, dur = { rod = 20 } } },
+    } } })
+    for _ = 1, 10 do CB['zfishing:rig:get'](5, 3) end
+    equal(CB['zfishing:rig:get'](5, 3), nil, 'the 11th request inside the window is gated')
+
+    _G.source = 5
+    EVENTS['playerDropped']()
+    truthy(CB['zfishing:rig:get'](5, 3), 'a reconnected src must not inherit the old bucket')
 end)
 
 -- =============================================================== session loader
@@ -925,24 +942,48 @@ end)
 -- Remove is deliberately NOT proximity-checked -- see H6 and the comment above
 -- BoatAnchor.Remove. Both entry points do reject a non-number netId (H7).
 
-local function loadBoatAnchor(pedPos, vehPos)
+-- pedPos       where src 5 stands; vehPos where netId 900 (a boat) sits.
+-- opts.peds     extra anglers, { [src] = pos }
+-- opts.entities extra netIds, { [netId] = { handle, etype, vtype, pos } } -- a ped
+--               (etype 1), an object (etype 3) or a car (etype 2 / 'automobile')
+local function loadBoatAnchor(pedPos, vehPos, opts)
+    opts = opts or {}
     installHost()
     BoatAnchor = nil                -- so a failed load is loud, like installHost() does
-    local peds, vehs = { [5] = 55 }, { [900] = 99 }
-    _G.GetPlayerPed = function(src) return peds[src] or 0 end
+
+    -- src 5 keeps handle 55 and netId 900 keeps handle 99: H4 and H6 re-stub
+    -- GetPlayerPed / GetEntityCoords against those exact numbers by hand.
+    local function pedHandle(src) return src == 5 and 55 or (200 + src) end
+    local pedPositions = { [5] = pedPos }
+    for src, pos in pairs(opts.peds or {}) do pedPositions[src] = pos end
+
+    local entities = { [900] = { handle = 99, etype = 2, vtype = 'boat', pos = vehPos } }
+    for netId, e in pairs(opts.entities or {}) do entities[netId] = e end
+    local byHandle = {}
+    for _, e in pairs(entities) do byHandle[e.handle] = e end
+
+    _G.GetPlayerPed = function(src) return pedPositions[src] and pedHandle(src) or 0 end
     _G.NetworkGetEntityFromNetworkId = function(netId)
         -- the real native raises when handed a non-number, which is the
         -- console-spam path a hostile client can trigger; keep the stub faithful
         if type(netId) ~= 'number' then
             error('Invalid argument #1 to NetworkGetEntityFromNetworkId', 2)
         end
-        return vehs[netId] or 0
+        local e = entities[netId]
+        return e and e.handle or 0
     end
     _G.DoesEntityExist = function(e) return e ~= 0 end
-    _G.GetEntityCoords = function(e)
-        if e == 55 then return pedPos end
-        if e == 99 then return vehPos end
-        return { x = 0.0, y = 0.0, z = 0.0 }
+    -- server natives, both present on the shipped artifact
+    -- (citizen/scripting/lua/natives_server.lua): entity type 2 == vehicle, and
+    -- GetVehicleType returns nil for anything that is not a vehicle.
+    _G.GetEntityType = function(h) local e = byHandle[h]; return e and e.etype or 0 end
+    _G.GetVehicleType = function(h) local e = byHandle[h]; return e and e.vtype or nil end
+    _G.GetEntityCoords = function(h)
+        for src, pos in pairs(pedPositions) do
+            if pedHandle(src) == h then return pos end
+        end
+        local e = byHandle[h]
+        return e and e.pos or { x = 0.0, y = 0.0, z = 0.0 }
     end
     dofile('server/boat_anchor.lua')
 end
@@ -1023,6 +1064,546 @@ test('H7 a non-number netId is refused at both entry points without raising', fu
     falsy(BoatAnchor.Add(5, '900'), 'a string netId must not anchor')
     falsy(BoatAnchor.Remove(5, {}), 'a table netId must not unanchor')
     equal(#spy.clientEvents, 0, 'nothing may be broadcast for a malformed netId')
+end)
+
+test('H8 a netId that resolves to something other than a vehicle is refused', function()
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 }, {
+        entities = {
+            [901] = { handle = 91, etype = 1, pos = { x = 0.0, y = 0.0, z = 0.0 } },  -- a ped
+            [902] = { handle = 92, etype = 3, pos = { x = 0.0, y = 0.0, z = 0.0 } },  -- an object
+        },
+    })
+    falsy(BoatAnchor.Add(5, 901), 'a ped netId must not enter the anchor table')
+    falsy(BoatAnchor.Add(5, 902), 'an object netId must not enter the anchor table')
+    equal(#spy.clientEvents, 0, 'nothing may be broadcast for a non-vehicle')
+end)
+
+test('H9 a vehicle that is not a boat is refused', function()
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 }, {
+        entities = { [903] = { handle = 93, etype = 2, vtype = 'automobile',
+            pos = { x = 0.0, y = 0.0, z = 0.0 } } },
+    })
+    falsy(BoatAnchor.Add(5, 903), 'a car must never enter the anchor refcount')
+    equal(#spy.clientEvents, 0)
+end)
+
+test('H10 the 15m allowance is deliberate: a stern angler 10m from the origin still anchors', function()
+    -- getFishingBoat()'s second branch is GetVehiclePedIsIn(ped, true) -- the LAST
+    -- vehicle -- and it matches at any distance. A player who was seated in a large
+    -- boat, stood up and walked to the stern is ~10m from the vehicle ORIGIN, and
+    -- server-side GetVehiclePedIsIn(ped, false) returns 0 for them, so no seat check
+    -- rescues that case. Tightening the radius to the client's 3.5m probe would
+    -- refuse them while client/main.lua attaches them to the deck regardless.
+    loadBoatAnchor({ x = 10.0, y = 0.0, z = 1.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    truthy(BoatAnchor.Add(5, 900), 'a stern-standing angler must still anchor')
+
+    loadBoatAnchor({ x = 20.0, y = 0.0, z = 1.0 }, { x = 0.0, y = 0.0, z = 0.0 })
+    falsy(BoatAnchor.Add(5, 900), 'and 20m away is still refused')
+end)
+
+test('H11 a player may hold only one anchor at a time', function()
+    -- The reach of a modified client standing in a marina: without this it could
+    -- freeze every boat within 15m at once; with it, one boat -- the same reach an
+    -- honest client has, which tracks a single currentBoatNetId.
+    loadBoatAnchor({ x = 1.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 }, {
+        entities = { [901] = { handle = 91, etype = 2, vtype = 'boat',
+            pos = { x = 3.0, y = 0.0, z = 0.0 } } },
+    })
+    truthy(BoatAnchor.Add(5, 900), 'the boat being fished from anchors')
+    falsy(BoatAnchor.Add(5, 901), 'a second boat moored alongside must not also be frozen')
+    equal(#spy.clientEvents, 1, 'only the first boat was broadcast')
+
+    truthy(BoatAnchor.Remove(5, 900), 'releasing the first')
+    truthy(BoatAnchor.Add(5, 901), 'frees the player to anchor another boat')
+end)
+
+test('H12 two anglers on one boat refcount, and it unfreezes only on the last release', function()
+    loadBoatAnchor({ x = 2.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 },
+        { peds = { [6] = { x = 3.0, y = 0.0, z = 0.0 } } })
+    truthy(BoatAnchor.Add(5, 900), 'the first angler anchors and broadcasts')
+    falsy(BoatAnchor.Add(6, 900), 'the second takes a reference without a second broadcast')
+    equal(#spy.clientEvents, 1)
+
+    falsy(BoatAnchor.Remove(5, 900), 'one angler leaving must not unfreeze the boat')
+    equal(#spy.clientEvents, 1)
+    truthy(BoatAnchor.Remove(6, 900), 'the last release unfreezes it')
+    equal(spy.clientEvents[2].args[2], false, 'state=false')
+end)
+
+test("H13 a disconnect drops only that angler's reference", function()
+    loadBoatAnchor({ x = 2.0, y = 0.0, z = 0.0 }, { x = 0.0, y = 0.0, z = 0.0 },
+        { peds = { [6] = { x = 3.0, y = 0.0, z = 0.0 } } })
+    truthy(BoatAnchor.Add(5, 900))
+    falsy(BoatAnchor.Add(6, 900))
+
+    BoatAnchor.OnDisconnect(5)
+    equal(#spy.clientEvents, 1, 'the co-angler still holds the boat')
+    BoatAnchor.OnDisconnect(6)
+    equal(#spy.clientEvents, 2, 'the last holder leaving unfreezes it')
+    equal(spy.clientEvents[2].args[2], false)
+end)
+
+-- =============================================================== GROUP I
+-- Fish selling (rewards.lua) — Requirements 6.5, 23.5
+-- sellAll removes fish and then pays for them across a resource boundary that
+-- yields. The invariant under every failure and every race below is:
+--     money paid <= value of the fish that actually left the inventory
+-- and no fish is ever destroyed without being paid for.
+
+local function loadRewards(opts)
+    opts = opts or {}
+    installHost()
+    Config = baseConfig()
+    Rewards = nil
+    Config.Fish = {
+        bass  = { label = 'Bass',  price = 100, xp = 10, behavior = 'steady_light',
+            rarity = 'common', weight = { min = 1, max = 3 }, water = { 'lake' } },
+        trout = { label = 'Trout', price = 50,  xp = 8,  behavior = 'steady_light',
+            rarity = 'common', weight = { min = 1, max = 3 }, water = { 'lake' } },
+    }
+    local inv = opts.inv or {}
+    local Z, _, calls = makeZfishing({ mode = opts.mode or 'enhanced', blocked = opts.blocked, inv = inv })
+    Zfishing = Z
+    Progression = {
+        Get = function() return { level = 5, identifier = 'license:test' } end,
+        Load = function() end, AddXP = function() end, Save = function() end,
+    }
+    dofile('shared/util.lua')
+    dofile('server/rewards.lua')
+    return inv, calls
+end
+
+-- Records the exact sum handed to the player, so a test can assert the payout
+-- rather than just "money was added at least once".
+local function recordPayouts()
+    local paid = { total = 0, calls = 0 }
+    Zfishing.AddMoney = function(_, amount)
+        paid.calls = paid.calls + 1
+        paid.total = paid.total + amount
+        return true
+    end
+    return paid
+end
+
+local function fishSlot(name, count, weight)
+    return { name = name, count = count, metadata = { weight = weight, quality = 3 } }
+end
+
+test('I1 sellAll pays for every fish it removes and empties the bag', function()
+    local inv, calls = loadRewards({ inv = { [5] = {
+        [1] = fishSlot('fish_bass', 1, 2.0),
+        [2] = fishSlot('fish_trout', 1, 2.0),
+    } } })
+    local paid = recordPayouts()
+
+    local res = CB['zfishing:sellAll'](5)
+    truthy(res.ok, 'a sale with fish in the bag succeeds')
+    equal(res.total, 300, 'bass 100*2.0 + trout 50*2.0, both at 3 star')
+    equal(paid.total, 300, 'the money paid equals the value of the fish removed')
+    equal(paid.calls, 1, 'exactly one payout')
+    equal(calls.removeSlot, 2, 'both slots were removed by slot')
+    equal(next(inv[5]), nil, 'nothing fish-shaped is left in the bag')
+end)
+
+test('I2 selling with no fish pays nothing and names no error', function()
+    loadRewards({ inv = { [5] = { [1] = { name = 'worm', count = 5 } } } })
+    local paid = recordPayouts()
+
+    local res = CB['zfishing:sellAll'](5)
+    falsy(res.ok)
+    equal(res.total, 0)
+    equal(res.reason, nil, 'an empty bag is not a failure the client should name')
+    equal(paid.calls, 0, 'no money for an empty sale')
+end)
+
+test('I3 two sellAll requests racing pay once and remove the fish once', function()
+    local inv, calls = loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } } })
+    local paid = { total = 0, calls = 0 }
+    Zfishing.AddMoney = function(_, amount)
+        coroutine.yield()                 -- park inside the payout, like a framework call
+        paid.calls = paid.calls + 1
+        paid.total = paid.total + amount
+        return true
+    end
+
+    local first = coroutine.create(function() return CB['zfishing:sellAll'](5) end)
+    truthy(coroutine.resume(first), 'the first sale must reach the payout')
+    equal(coroutine.status(first), 'suspended', 'and park there')
+
+    local second = coroutine.create(function() return CB['zfishing:sellAll'](5) end)
+    local ok2, res2 = coroutine.resume(second)
+    truthy(ok2)
+    equal(coroutine.status(second), 'dead', 'the racing request must not park in the payout too')
+    equal(res2.reason, 'sale_busy', 'it is refused by the per-player selling lock')
+    equal(res2.total, 0)
+
+    local ok1, res1 = coroutine.resume(first)
+    truthy(ok1)
+    truthy(res1.ok, 'the original sale still completes')
+    equal(paid.calls, 1, 'exactly one payout for one fish')
+    equal(paid.total, res1.total)
+    equal(calls.removeSlot, 1, 'the fish left the inventory exactly once')
+    equal(next(inv[5]), nil)
+end)
+
+test('I4 a slot that fails to remove is never paid for and stays in the bag', function()
+    local inv = { [5] = {
+        [1] = fishSlot('fish_bass', 1, 2.0),
+        [2] = fishSlot('fish_trout', 1, 2.0),
+    } }
+    loadRewards({ inv = inv })
+    local paid = recordPayouts()
+    local realRemove = Zfishing.RemoveItemSlot
+    Zfishing.RemoveItemSlot = function(src, item, count, slot)
+        if slot == 2 then return false end          -- the inventory refuses this one
+        return realRemove(src, item, count, slot)
+    end
+
+    local res = CB['zfishing:sellAll'](5)
+    truthy(res.ok)
+    equal(res.total, 200, 'only the fish that actually left the inventory is paid for')
+    equal(paid.total, 200)
+    truthy(inv[5][2], 'the fish that could not be removed is still in the bag')
+end)
+
+test('I5 a failed payout hands every fish back and reports payout_failed', function()
+    local inv = { [5] = {
+        [1] = fishSlot('fish_bass', 1, 2.0),
+        [2] = fishSlot('fish_trout', 2, 2.0),
+    } }
+    local _, calls = loadRewards({ inv = inv })
+    Zfishing.AddMoney = function() return false end
+
+    local res = CB['zfishing:sellAll'](5)
+    falsy(res.ok, 'a sale nobody paid for is not a success')
+    equal(res.reason, 'payout_failed')
+    equal(res.total, 0)
+
+    local back, meta = {}, nil
+    for _, s in pairs(inv[5]) do
+        back[s.name] = (back[s.name] or 0) + (s.count or 1)
+        if s.name == 'fish_bass' then meta = s.metadata end
+    end
+    equal(back.fish_bass, 1, 'the bass is back in the bag')
+    equal(back.fish_trout, 2, 'the whole trout stack is back in the bag')
+    truthy(meta and meta.weight == 2.0, 'and it is returned with its per-catch metadata')
+    truthy(calls.addItem >= 2, 'both removals were reversed')
+end)
+
+test('I6 the selling lock is released after a failed payout', function()
+    loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } } })
+    Zfishing.AddMoney = function() return false end
+    falsy(CB['zfishing:sellAll'](5).ok, 'the first sale fails at the payout')
+
+    local paid = recordPayouts()
+    _G.__NOW = _G.__NOW + 4000                       -- past the sell flood window
+    local second = CB['zfishing:sellAll'](5)
+    truthy(second.ok, 'a lock left held would refuse this with sale_busy')
+    equal(paid.total, 200, 'and the returned fish sells for its real value')
+end)
+
+test('I6b a raised error releases the lock and is reported, not swallowed', function()
+    loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } } })
+    local realSearch = Zfishing.Search
+    Zfishing.Search = function() error('inventory adapter exploded') end
+
+    local res = CB['zfishing:sellAll'](5)
+    falsy(res.ok)
+    equal(res.reason, 'sale_failed')
+    equal(res.total, 0)
+
+    Zfishing.Search = realSearch
+    local paid = recordPayouts()
+    _G.__NOW = _G.__NOW + 4000
+    truthy(CB['zfishing:sellAll'](5).ok, 'the lock must not survive the error')
+    equal(paid.total, 200)
+end)
+
+test('I7 sellAll is flood-gated and a throttled request sweeps no inventory', function()
+    loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } } })
+    truthy(CB['zfishing:sellAll'](5).ok)
+    CB['zfishing:sellAll'](5)                        -- second request inside the window
+
+    local searches = 0
+    local realSearch = Zfishing.Search
+    Zfishing.Search = function(...) searches = searches + 1; return realSearch(...) end
+    local third = CB['zfishing:sellAll'](5)
+    equal(third.reason, 'too_many_requests')
+    equal(searches, 0, 'the gate refuses before any inventory sweep')
+
+    _G.__NOW = _G.__NOW + 4000
+    truthy(CB['zfishing:sellAll'](5).reason ~= 'too_many_requests', 'the window reopens')
+end)
+
+test('I8 simple mode prices at species average and pays only for a successful removal', function()
+    local _, calls = loadRewards({ mode = 'simple', inv = { [5] = {
+        [1] = { name = 'fish_bass', count = 3 },
+    } } })
+    local paid = recordPayouts()
+    local res = CB['zfishing:sellAll'](5)
+    truthy(res.ok)
+    equal(res.total, 600, '3 x (100 * average weight 2.0 * 3 star)')
+    equal(paid.total, 600)
+    equal(calls.removeItem, 1, 'the whole stack goes in one removal')
+
+    local inv2 = { [5] = { [1] = { name = 'fish_bass', count = 3 } } }
+    loadRewards({ mode = 'simple', inv = inv2 })
+    local paid2 = recordPayouts()
+    Zfishing.RemoveItem = function() return false end
+    local refused = CB['zfishing:sellAll'](5)
+    falsy(refused.ok, 'a removal the inventory refused pays nothing')
+    equal(refused.total, 0)
+    equal(paid2.calls, 0)
+    truthy(inv2[5][1], 'and the fish stay in the bag')
+end)
+
+-- =============================================================== GROUP J
+-- Cancel lifecycle against the settling lock (session.lua) — Requirements 6.5, 23.5
+-- Cancel is the escape hatch and must stay instant in every live state; the one
+-- state it must NOT free is 'settling', which the reward path owns until it ends.
+
+test('J1 cancel frees the session in every live state', function()
+    for _, phase in ipairs({ 'waiting', 'hooking', 'reeling' }) do
+        loadSession({ requireZone = false })
+        local cast = CB['zfishing:cast'](5, 0.5)
+        truthy(cast.ok, phase .. ': cast')
+        if phase ~= 'waiting' then TIMERS[1].fn() end                      -- -> hooking
+        if phase == 'reeling' then truthy(CB['zfishing:hook'](5, cast.sessionId).ok) end
+
+        truthy(CB['zfishing:cancel'](5, cast.sessionId).ok, phase .. ': cancel answers ok')
+        truthy(CB['zfishing:cast'](5, 0.5).ok, phase .. ': the session is free for a new cast')
+    end
+end)
+
+test('J2 cancel during settling answers ok but does not free the session', function()
+    local _, rewardCalls = loadSession({ requireZone = false, yieldOnGive = true })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local claim = coroutine.create(function()
+        return CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    truthy(coroutine.resume(claim))
+    equal(coroutine.status(claim), 'suspended', 'the claim is parked inside the reward path')
+
+    truthy(CB['zfishing:cancel'](5, cast.sessionId).ok,
+        'the client still gets ok so it can run its single teardown path')
+    equal(CB['zfishing:cast'](5, 0.5).reason, 'busy',
+        'settlement still owns the session -- a new cast must not start on top of it')
+
+    local ok, res = coroutine.resume(claim)
+    truthy(ok)
+    truthy(res.ok, 'the reward still settles')
+    equal(rewardCalls.give, 1)
+    truthy(CB['zfishing:cast'](5, 0.5).ok, 'and the reward path clears the session when it ends')
+end)
+
+test('J3 a stale cancel token is refused and leaves the live session alone', function()
+    loadSession({ requireZone = false })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    equal(CB['zfishing:cancel'](5, 'not-my-session').reason, 'invalid_session')
+    equal(CB['zfishing:cast'](5, 0.5).reason, 'busy', 'the real session survived the bogus cancel')
+    truthy(CB['zfishing:cancel'](5, cast.sessionId).ok)
+end)
+
+test('J4 a claim replayed after a cancel during settling is still refused', function()
+    local _, rewardCalls = loadSession({ requireZone = false, yieldOnGive = true })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local claim = coroutine.create(function()
+        return CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    truthy(coroutine.resume(claim))
+    truthy(CB['zfishing:cancel'](5, cast.sessionId).ok)
+
+    local replay = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    falsy(replay.ok, 'the replay must not be paid a second time')
+    equal(rewardCalls.give, 1)
+
+    local _, settled = coroutine.resume(claim)
+    truthy(settled.ok, 'the original claim still settles')
+    equal(rewardCalls.give, 1, 'the reward was handed out exactly once')
+end)
+
+test('J5 an error inside the reward path still frees the session', function()
+    loadSession({ requireZone = false })
+    Rewards.GiveCatch = function() error('inventory adapter exploded') end
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local claim = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    falsy(claim.ok)
+    equal(claim.reason, 'settle_failed')
+    truthy(CB['zfishing:cast'](5, 0.5).ok,
+        'cancel no longer rescues a settling session, so the reward path must never leave one behind')
+end)
+
+-- =============================================================== GROUP K
+-- Low-cost client -> server events: store sync + weather report
+-- Neither costs much per request, which is exactly why an ungated one is worth
+-- flooding. The weather report is additionally the only client-supplied value the
+-- server keeps, so it is whitelisted rather than merely rate limited.
+
+local function loadWeather()
+    installHost()
+    Config = baseConfig()
+    GetWeatherState = nil               -- installHost stubs it; a failed load must be loud
+    _G.GetResourceState = function() return 'stopped' end     -- no weathersync resource
+    _G.exports = {}
+    dofile('shared/util.lua')
+    dofile('server/weather.lua')
+end
+
+local function report(src, weather, hour)
+    _G.source = src
+    NETEVENTS['zfishing:reportWeather'](weather, hour)
+end
+
+test('K1 a valid weather report updates the fallback state', function()
+    loadWeather()
+    report(5, 'rain', 7)
+    local w = GetWeatherState()
+    equal(w.weather, 'RAIN', 'the name is normalised to upper case')
+    equal(w.hour, 7)
+end)
+
+test('K2 malformed weather never overwrites the state', function()
+    loadWeather()
+    report(5, 'THUNDER', 3)                   -- the known-good state to protect
+    -- a fresh src per case: the gate is per player, and a report refused by the
+    -- gate would prove nothing about the validation
+    local bad = {
+        { nil, 3 }, { 'THUNDER', nil }, { 'THUNDER', 0 / 0 }, { 'THUNDER', math.huge },
+        { 'THUNDER', -math.huge }, { 'THUNDER', -1 }, { 'THUNDER', 24 }, { 'THUNDER', 99 },
+        { 'THUNDER', '5' }, { 'THUNDER', {} }, { {}, 3 }, { 'LAVA_STORM', 3 }, { '', 3 },
+    }
+    for i, case in ipairs(bad) do
+        report(1000 + i, case[1], case[2])
+        local w = GetWeatherState()
+        equal(w.weather, 'THUNDER', 'case ' .. i .. ': the weather must not move')
+        equal(w.hour, 3, 'case ' .. i .. ': the hour must not move')
+    end
+end)
+
+test('K3 weather reports are rate limited per player', function()
+    loadWeather()
+    report(5, 'RAIN', 7); report(5, 'CLEAR', 8); report(5, 'SNOW', 9)
+    report(5, 'THUNDER', 10)                  -- 4th inside the window
+    local w = GetWeatherState()
+    equal(w.weather, 'SNOW', 'the throttled report must not land')
+    equal(w.hour, 9)
+
+    report(6, 'THUNDER', 10)
+    equal(GetWeatherState().weather, 'THUNDER', 'the gate is per player, not global')
+
+    _G.__NOW = _G.__NOW + 61000
+    report(5, 'FOGGY', 11)
+    equal(GetWeatherState().weather, 'FOGGY', 'the window reopens')
+end)
+
+test('K4 every weather name the client can report is accepted by the server', function()
+    -- client/main.lua reports from ZUtil.WEATHER_TYPES and server/weather.lua
+    -- whitelists against the same table; a narrower server list would drop honest
+    -- reports and silently freeze the weather bonus at its fallback.
+    loadWeather()
+    for i, name in ipairs(ZUtil.WEATHER_TYPES) do
+        report(1000 + i, name, 12)
+        equal(GetWeatherState().weather, name, name .. ' must be accepted')
+    end
+end)
+
+local function loadStore()
+    installHost()
+    Config = baseConfig()
+    Store = nil
+    Config.Zones = { { name = 'Lake', water = 'lake',
+        coords = { x = 0.0, y = 0.0, z = 0.0 }, radius = 50.0 } }
+    dofile('shared/util.lua')
+    dofile('server/store.lua')
+end
+
+test('K5 store:request is rate limited and a throttled request syncs nothing', function()
+    loadStore()
+    local function request(src) _G.source = src; NETEVENTS['zfishing:store:request']() end
+
+    request(5); request(5); request(5)
+    equal(#spy.clientEvents, 3, 'three requests inside the window are answered')
+    request(5)
+    equal(#spy.clientEvents, 3, 'the fourth is dropped -- no sync, no error')
+
+    request(6)
+    equal(#spy.clientEvents, 4, 'the gate is per player')
+    _G.__NOW = _G.__NOW + 11000
+    request(5)
+    equal(#spy.clientEvents, 5, 'the window reopens')
+end)
+
+test('I9 a disconnect mid-sale releases the selling lock', function()
+    -- a player who drops while the sale is parked never returns through the
+    -- callback's pcall, so playerDropped is the only thing that frees the lock --
+    -- without it the same server id refuses every sale after a reconnect
+    loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } } })
+    Zfishing.AddMoney = function() coroutine.yield(); return true end
+
+    local parked = coroutine.create(function() return CB['zfishing:sellAll'](5) end)
+    truthy(coroutine.resume(parked))
+    equal(coroutine.status(parked), 'suspended', 'the sale is parked inside the payout')
+
+    _G.source = 5
+    EVENTS['playerDropped']()
+
+    local after = CB['zfishing:sellAll'](5)
+    truthy(after.reason ~= 'sale_busy', 'a lock left behind by the disconnect would block the reconnected src')
+end)
+
+-- =============================================================== GROUP L
+-- The boat-anchor net events (session.lua). The gate sits on the EVENT, not on
+-- BoatAnchor.Add, so every group H test -- which calls Add directly -- bypasses it.
+
+local function loadAnchorEvents()
+    loadSession({ requireZone = false })
+    local seen = { add = 0, remove = 0 }
+    BoatAnchor = {                       -- session.lua does not load boat_anchor.lua
+        Add = function() seen.add = seen.add + 1 end,
+        Remove = function() seen.remove = seen.remove + 1 end,
+        OnDisconnect = function() end,
+    }
+    return seen
+end
+
+test('L1 anchorBoat is flood-gated and unanchorBoat deliberately is not', function()
+    local seen = loadAnchorEvents()
+    _G.source = 5
+
+    for _ = 1, 6 do NETEVENTS['zfishing:server:anchorBoat'](900) end
+    equal(seen.add, 5, 'max 5 per 5000ms reach BoatAnchor.Add')
+
+    for _ = 1, 20 do NETEVENTS['zfishing:server:unanchorBoat'](900) end
+    equal(seen.remove, 20,
+        'the release path must never be throttled -- a dropped unanchor freezes a boat for good')
+
+    _G.__NOW = _G.__NOW + 6000
+    NETEVENTS['zfishing:server:anchorBoat'](900)
+    equal(seen.add, 6, 'the window reopens')
+end)
+
+test('L2 playerDropped clears the session gate buckets', function()
+    local seen = loadAnchorEvents()
+    _G.source = 5
+    for _ = 1, 6 do NETEVENTS['zfishing:server:anchorBoat'](900) end
+    equal(seen.add, 5)
+
+    EVENTS['playerDropped']()
+    NETEVENTS['zfishing:server:anchorBoat'](900)
+    equal(seen.add, 6, 'a reconnected src must not inherit the old bucket')
 end)
 
 -- ---------------------------------------------------------------- runner

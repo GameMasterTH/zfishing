@@ -9,9 +9,10 @@ local rate = {}       -- [src] = { count, windowStart }
 -- Per-action flood gate. Distinct from Config.RateLimit, which is the catch-rate
 -- economy control and only counts SUCCESSFUL catches. This one counts requests.
 local gate = ZUtil.MakeRateGate({
-    cast  = { max = 3, window = 2000 },
-    hook  = { max = 5, window = 2000 },
-    claim = { max = 3, window = 3000 },
+    cast   = { max = 3, window = 2000 },
+    hook   = { max = 5, window = 2000 },
+    claim  = { max = 3, window = 3000 },
+    anchor = { max = 5, window = 5000 },
 })
 
 local function reset(src) sessions[src] = nil end
@@ -251,29 +252,51 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     -- claim would otherwise still find state == 'reeling' and be paid again.
     s.state = 'settling'
 
-    local given = Rewards.GiveCatch(src, fish, s.zone)
+    -- pcall because cancel no longer frees a settling session (see below): an
+    -- error raised anywhere inside the reward path would otherwise leave
+    -- sessions[src] parked in 'settling' with nothing able to clear it, and the
+    -- player stuck on `busy` for every later cast until they reconnect.
+    local settled, given = pcall(Rewards.GiveCatch, src, fish, s.zone)
 
     -- the player may have dropped during the settle; playerDropped clears rate[src]
     if rate[src] then rate[src].count = rate[src].count + 1 end
 
     print(('[zfishing] claim settled session=%s src=%s species=%s reward=%s')
-        :format(s.id, src, fish.species, tostring(given)))
+        :format(s.id, src, fish.species, tostring(settled and given)))
 
     reset(src)
+    if not settled then
+        print(('[zfishing] settlement errored session=%s src=%s: %s'):format(s.id, src, tostring(given)))
+        return { ok = false, reason = 'settle_failed' }
+    end
     if not given then return { ok = false, reason = 'inv_full' } end
     return { ok = true, fish = { label = fish.label, weight = fish.weight, quality = fish.quality, species = fish.species } }
 end)
 
 lib.callback.register('zfishing:cancel', function(src, sessionId)
-    if not sessionFor(src, sessionId) then return { ok = false, reason = 'invalid_session' } end
+    local s = sessionFor(src, sessionId)
+    if not s then return { ok = false, reason = 'invalid_session' } end
+    -- Settlement owns the session from 'settling' until the claim callback clears
+    -- it. Answer ok so the client still runs its single teardown path (UI, anim,
+    -- bobber, boat) -- but do NOT free sessions[src] here: an early reset would let
+    -- the next cast start while the previous reward is still in flight. The cost is
+    -- a short window where a cast returns `busy` after a cancel; the reward path
+    -- clears the session a moment later. Cancel stays instant in every other state.
+    if s.state == 'settling' then return { ok = true } end
     reset(src); return { ok = true }
 end)
 
 RegisterNetEvent('zfishing:server:anchorBoat', function(netId)
     local src = source
+    if not gate.allow(src, 'anchor') then return end
     BoatAnchor.Add(src, netId)
 end)
 
+-- Deliberately ungated, for the same reason cancel is: this is the release path.
+-- A throttled unanchor leaves a boat frozen for good -- client/main.lua nils
+-- currentBoatNetId unconditionally, so the request is never retried. Flooding it
+-- costs one table lookup and broadcasts nothing unless the caller actually holds
+-- a reference to that boat.
 RegisterNetEvent('zfishing:server:unanchorBoat', function(netId)
     local src = source
     BoatAnchor.Remove(src, netId)
