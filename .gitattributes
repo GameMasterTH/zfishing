@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Lua sources are hashed byte-for-byte by web/src/__tests__/bundleRebuildPreservation.test.ts,
+# which reads the WORKING TREE. Under core.autocrlf the working tree would differ from the
+# committed blob on every fresh checkout, so that guard could never pass outside the machine
+# where its baseline was generated. Pinning eol keeps checkout byte-identical to the blob.
+*.lua text eol=lf
