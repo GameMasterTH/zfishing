@@ -65,6 +65,21 @@ RegisterNUICallback('reelEnergy', function(body, cb)
     Casting.SetFightEnergy(body.pct)
 end)
 
+-- A failed claim is not "the fish escaped" — an escape is `ok = true, fish = nil`.
+-- Explicit mapping rather than 'error_' .. reason: the claim's reasons are
+-- wire-level and not every one of them deserves (or has) a player-facing string,
+-- and a missing key would render as the raw reason. Anything unmapped, including a
+-- callback that never came back, falls through to error_claim_failed.
+-- web/src/__tests__/claimErrorLocales.test.ts asserts every value below exists in
+-- both locale files.
+local CLAIM_ERRORS = {
+    inv_full          = 'error_inv_full',
+    timeout           = 'error_claim_timeout',
+    settle_failed     = 'error_settle_failed',
+    too_many_requests = 'error_too_many_requests',
+    invalid_session   = 'error_invalid_session',
+}
+
 RegisterNUICallback('reelResult', function(body, cb)
     cb({})
     if not ZClient.reeling then return end
@@ -81,7 +96,7 @@ RegisterNUICallback('reelResult', function(body, cb)
     elseif res and res.ok then
         endFishing(body.reason == 'snap' and 'line_broke' or 'fish_escaped', 'error')
     else
-        endFishing('fish_escaped', 'error')
+        endFishing(CLAIM_ERRORS[res and res.reason] or 'error_claim_failed', 'error')
     end
 end)
 
