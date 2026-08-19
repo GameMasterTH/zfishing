@@ -53,6 +53,18 @@ describe('Claim failure locale coverage', () => {
     }
   })
 
+  // client/main.lua's sellFish still builds its key dynamically ('error_' .. reason),
+  // the pattern minigame.lua moved away from. Every reason server/rewards.lua can
+  // answer with is pinned here so a new one cannot ship as a raw key in-game.
+  it.each(['en', 'th'])('every sellAll reason resolves in %s.json', (lang) => {
+    const dict = locale(lang)
+    for (const reason of ['too_many_requests', 'sale_busy', 'payout_failed', 'sale_failed']) {
+      const key = `error_${reason}`
+      expect(dict, `${key} is a sellAll reason but is missing from ${lang}.json`)
+        .toHaveProperty([key])
+    }
+  })
+
   it('a failed claim never falls back to the escape message', () => {
     const lua = readFileSync(join(REPO, 'client', 'minigame.lua'), 'utf8')
     const branch = lua.slice(lua.indexOf("elseif res and res.ok then"), lua.indexOf("RegisterNUICallback('keep'"))
