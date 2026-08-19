@@ -142,25 +142,52 @@ local function collectSale(src)
     return total, removed
 end
 
--- The fish are already out of the inventory when the payout is attempted, so a
--- failed AddMoney must hand them back -- the resource never destroys an item
--- silently (same rule as rig attach/detach). A restore that itself fails is the
--- one case worth shouting about in the console: the player has lost fish.
-local function restoreSale(src, removed)
-    for _, r in ipairs(removed) do
-        if not Zfishing.AddItem(src, r.item, r.count, r.metadata) then
-            print(('[zfishing] SALE PAYOUT FAILED and %s x%s could not be returned to src=%s')
-                :format(r.item, tostring(r.count), tostring(src)))
-        end
-    end
+-- Correlation id for one sale attempt. Server-side only -- it is never sent to the
+-- client. It exists so the payout line, the compensation line and every CRITICAL
+-- line for the same sale can be tied together in a console an admin is reading
+-- after the fact, on a server where several players sell at once.
+local nextSaleSeq = 0
+local function newSaleId(src)
+    nextSaleSeq = nextSaleSeq + 1
+    return ('%s-%s-%s'):format(tostring(src), GetGameTimer(), nextSaleSeq)
 end
 
-local function runSale(src)
+local function metaSummary(meta)
+    if type(meta) ~= 'table' then return 'none' end
+    return ('%skg/%s star'):format(tostring(tonumber(meta.weight) or '?'), tostring(meta.quality or '?'))
+end
+
+-- The fish are already out of the inventory when the payout is attempted, so a
+-- failed AddMoney must hand them back -- the resource never destroys an item
+-- silently (same rule as rig attach/detach). Reports what it managed rather than
+-- printing and forgetting, so the caller can log one reconciliation record per
+-- sale instead of scattered lines with no correlation.
+local function restoreSale(src, removed)
+    local restored, failed = 0, {}
+    for _, r in ipairs(removed) do
+        if Zfishing.AddItem(src, r.item, r.count, r.metadata) then
+            restored = restored + 1
+        else
+            failed[#failed + 1] = r
+        end
+    end
+    return { restored = restored, failed = failed }
+end
+
+local function runSale(src, saleId)
     local total, removed = collectSale(src)
     if total <= 0 then return { ok = false, total = 0 } end
 
     if not Zfishing.AddMoney(src, total, 'fish-sale') then
-        restoreSale(src, removed)
+        local comp = restoreSale(src, removed)
+        print(('[zfishing] sale payout failed saleId=%s src=%s expectedPayout=%d removed=%d restored=%d restoreFailed=%d')
+            :format(saleId, tostring(src), total, #removed, comp.restored, #comp.failed))
+        -- the only path where a player is actually down fish with nothing to show
+        -- for it; everything an admin needs to make them whole goes on one line
+        for _, r in ipairs(comp.failed) do
+            print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s lost item=%s count=%s meta=%s expectedPayout=%d')
+                :format(saleId, tostring(src), r.item, tostring(r.count), metaSummary(r.metadata), total))
+        end
         return { ok = false, total = 0, reason = 'payout_failed' }
     end
 
@@ -179,11 +206,12 @@ lib.callback.register('zfishing:sellAll', function(src)
     if selling[src] then return { ok = false, total = 0, reason = 'sale_busy' } end
 
     selling[src] = true
-    local ok, res = pcall(runSale, src)
+    local saleId = newSaleId(src)
+    local ok, res = pcall(runSale, src, saleId)
     selling[src] = nil
 
     if not ok then
-        print(('[zfishing] sellAll errored for src=%s: %s'):format(tostring(src), tostring(res)))
+        print(('[zfishing] sellAll errored saleId=%s src=%s: %s'):format(saleId, tostring(src), tostring(res)))
         return { ok = false, total = 0, reason = 'sale_failed' }
     end
     return res
