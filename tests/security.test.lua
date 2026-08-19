@@ -614,7 +614,13 @@ local function loadSession(opts)
         -- Simulates the real GiveCatch yielding on AddItem / Progression.Save /
         -- MySQL.insert. The test drives the coroutine by hand to open the window.
         if opts.yieldOnGive then coroutine.yield() end
-        return opts.giveCatch ~= false
+        -- structured settlement result (server/rewards.lua): the fish item landing
+        -- in the inventory is the commit point, and `committed` is what the claim
+        -- callback reports to the player
+        if opts.giveCatch == false then
+            return { ok = false, committed = false, reason = 'inv_full' }
+        end
+        return { ok = true, committed = true, warnings = opts.warnings or {} }
     end }
     dofile('shared/util.lua')
     dofile('shared/rig_rules.lua')

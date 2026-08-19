@@ -252,24 +252,31 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     -- claim would otherwise still find state == 'reeling' and be paid again.
     s.state = 'settling'
 
-    -- pcall because cancel no longer frees a settling session (see below): an
-    -- error raised anywhere inside the reward path would otherwise leave
-    -- sessions[src] parked in 'settling' with nothing able to clear it, and the
-    -- player stuck on `busy` for every later cast until they reconnect.
-    local settled, given = pcall(Rewards.GiveCatch, src, fish, s.zone)
+    -- Backstop pcall. Every secondary effect inside GiveCatch guards itself, so
+    -- this only fires for a raise on the pre-commit path (or a broken Rewards
+    -- table) -- but it must stay, because cancel no longer frees a settling
+    -- session: without it an error would park sessions[src] in 'settling' with
+    -- nothing able to clear it and leave the player on `busy` until they reconnect.
+    local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone)
+    local committed = settled and type(res) == 'table' and res.committed == true
 
     -- the player may have dropped during the settle; playerDropped clears rate[src]
     if rate[src] then rate[src].count = rate[src].count + 1 end
 
-    print(('[zfishing] claim settled session=%s src=%s species=%s reward=%s')
-        :format(s.id, src, fish.species, tostring(settled and given)))
+    print(('[zfishing] claim settled session=%s src=%s species=%s committed=%s')
+        :format(s.id, src, fish.species, tostring(committed)))
+    if settled and type(res) == 'table' then
+        for _, w in ipairs(res.warnings or {}) do
+            print(('[zfishing] catch settlement warning session=%s src=%s stage=%s'):format(s.id, src, w))
+        end
+    end
 
     reset(src)
     if not settled then
-        print(('[zfishing] settlement errored session=%s src=%s: %s'):format(s.id, src, tostring(given)))
+        print(('[zfishing] settlement errored session=%s src=%s: %s'):format(s.id, src, tostring(res)))
         return { ok = false, reason = 'settle_failed' }
     end
-    if not given then return { ok = false, reason = 'inv_full' } end
+    if not committed then return { ok = false, reason = res.reason or 'inv_full' } end
     return { ok = true, fish = { label = fish.label, weight = fish.weight, quality = fish.quality, species = fish.species } }
 end)
 

@@ -17,6 +17,32 @@ function Rewards.RollRareLoot(src)
     return nil
 end
 
+-- Runs one secondary effect of an already-committed catch. A stage that fails --
+-- raised, or reported false -- is recorded as a warning and logged with its cause;
+-- it never propagates, because by the time these run the fish is already in the
+-- player's inventory. Every stage must return an explicit boolean: `not err`
+-- rather than `err == false` so a stage that forgets to return cannot pass silently.
+local function runStage(src, warnings, stage, fn)
+    local ok, err = pcall(fn)
+    if not ok or not err then
+        warnings[#warnings + 1] = stage
+        print(('[zfishing] catch settlement warning src=%s stage=%s: %s')
+            :format(tostring(src), stage, ok and 'stage reported failure' or tostring(err)))
+    end
+end
+
+-- The catch commit boundary.
+--
+-- The fish item entering the inventory is the commit point. Everything after it --
+-- XP, XP persistence, the catch log, rare loot -- is a secondary effect, and a
+-- secondary failure must NEVER turn the catch back into a failure: the fish is in
+-- the player's bag, so telling them they caught nothing would make the server state
+-- and what they see disagree. Secondary failures surface as console warnings for an
+-- operator, not as a client-visible outcome.
+--
+-- Returns a structured result rather than a boolean:
+--   { ok = true,  committed = true,  warnings = { <stage>, ... } }
+--   { ok = false, committed = false, reason = 'inv_full' }
 function Rewards.GiveCatch(src, fish, zoneName)
     -- enhanced mode carries per-catch weight/quality in item metadata; simple mode
     -- has no per-instance metadata, so the catch is a plain stack. The mode is the
@@ -28,22 +54,39 @@ function Rewards.GiveCatch(src, fish, zoneName)
             description = ('%s | %.2fkg | %d star'):format(fish.label, fish.weight, fish.quality),
         }
     end
-    if not Zfishing.AddItem(src, 'fish_'..fish.species, 1, meta) then return false end
+    if not Zfishing.AddItem(src, 'fish_'..fish.species, 1, meta) then
+        return { ok = false, committed = false, reason = 'inv_full' }
+    end
 
-    Progression.AddXP(src, fish.xp)
-    Progression.Save(src)
+    -- ---------------- COMMITTED from here down ----------------
+    local warnings = {}
 
-    local c = Progression.Get(src)
-    if c then
+    runStage(src, warnings, 'xp_save_failed', function()
+        -- the player dropped mid-settle: the progression cache is already gone, so
+        -- there is nothing to persist and nothing worth warning an operator about
+        if not Progression.Get(src) then return true end
+        Progression.AddXP(src, fish.xp)
+        Progression.Save(src)
+        return true
+    end)
+
+    runStage(src, warnings, 'catch_log_failed', function()
+        local c = Progression.Get(src)
+        if not c then return true end          -- dropped mid-settle: no identifier to log against
         MySQL.insert('INSERT INTO zfishing_catches (identifier, species, weight, quality, zone) VALUES (?, ?, ?, ?, ?)',
             { c.identifier, fish.species, fish.weight, fish.quality, zoneName })
-    end
+        return true
+    end)
 
-    local loot = Rewards.RollRareLoot(src)
-    if loot and Zfishing.AddItem(src, loot, 1, nil) then
+    runStage(src, warnings, 'rare_loot_failed', function()
+        local loot = Rewards.RollRareLoot(src)
+        if not loot then return true end       -- nothing rolled is the common case
+        if not Zfishing.AddItem(src, loot, 1, nil) then return false end
         Zfishing.Notify(src, 'You reeled in something extra!', 'success')
-    end
-    return true
+        return true
+    end)
+
+    return { ok = true, committed = true, warnings = warnings }
 end
 
 -- One sale at a time, per player. Every step below crosses the zcore_lib resource
