@@ -66,16 +66,15 @@ function Rewards.GiveCatch(src, fish, zoneName)
         -- there is nothing to persist and nothing worth warning an operator about
         if not Progression.Get(src) then return true end
         Progression.AddXP(src, fish.xp)
-        Progression.Save(src)
-        return true
+        return Progression.SaveAwait(src)
     end)
 
     runStage(src, warnings, 'catch_log_failed', function()
         local c = Progression.Get(src)
         if not c then return true end          -- dropped mid-settle: no identifier to log against
-        MySQL.insert('INSERT INTO zfishing_catches (identifier, species, weight, quality, zone) VALUES (?, ?, ?, ?, ?)',
-            { c.identifier, fish.species, fish.weight, fish.quality, zoneName })
-        return true
+        return MySQL.insert.await(
+            'INSERT INTO zfishing_catches (identifier, species, weight, quality, zone) VALUES (?, ?, ?, ?, ?)',
+            { c.identifier, fish.species, fish.weight, fish.quality, zoneName }) ~= nil
     end)
 
     runStage(src, warnings, 'rare_loot_failed', function()

@@ -36,6 +36,23 @@ function Progression.Save(src)
         { c.xp, c.level, json.encode(c.stats or {}), c.identifier })
 end
 
+-- Same write as Save, but awaited so the caller can tell whether the XP actually
+-- persisted. Only the catch settlement path uses it: Save() stays fire-and-forget
+-- for Unload / playerDropped / the QA command, where nobody reads the result and a
+-- yielding write would be a regression risk for no gain.
+--
+-- Success is `affected ~= nil`, NOT `affected > 0`. oxmysql reports rows *changed*,
+-- and ConfigSchema clamps a species' xp to 0..100000 -- an admin can set 0, and a
+-- 0-XP catch writes identical values, which MySQL reports as 0 changed rows for a
+-- write that worked. Only nil, meaning no result came back at all, is a failure.
+function Progression.SaveAwait(src)
+    local c = cache[src]; if not c then return false end
+    local affected = MySQL.update.await(
+        'UPDATE zfishing_players SET xp = ?, level = ?, stats = ? WHERE identifier = ?',
+        { c.xp, c.level, json.encode(c.stats or {}), c.identifier })
+    return affected ~= nil
+end
+
 function Progression.Unload(src)
     Progression.Save(src); cache[src] = nil
 end
