@@ -1612,6 +1612,350 @@ test('L2 playerDropped clears the session gate buckets', function()
     equal(seen.add, 6, 'a reconnected src must not inherit the old bucket')
 end)
 
+-- =============================================================== GROUP N
+-- The catch commit boundary (rewards.lua) — Requirements 6.5, 27.1
+-- The fish item entering the inventory is the commit point. Below it, every
+-- secondary effect may fail without turning the catch back into a failure: the
+-- fish is in the player's bag, so reporting "no catch" would make the server
+-- state and what the player sees disagree. These tests load the REAL GiveCatch
+-- and the REAL progression module -- a mocked GiveCatch would prove nothing here.
+
+-- MySQL node that raises, for the "a secondary stage throws" cases.
+local function raisingNode(msg)
+    local function boom() error(msg, 0) end
+    return setmetatable({ await = boom }, { __call = boom })
+end
+
+local function capturePrints(fn)
+    local lines, real = {}, print
+    _G.print = function(...)
+        local t = {}
+        for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end
+        lines[#lines + 1] = table.concat(t, '\t')
+    end
+    local ok, err = pcall(fn)
+    _G.print = real
+    if not ok then error(err, 0) end
+    return lines
+end
+
+local function findLine(lines, needle)
+    for _, l in ipairs(lines) do if l:find(needle, 1, true) then return l end end
+    return nil
+end
+
+local function hasWarning(res, stage)
+    for _, w in ipairs((res or {}).warnings or {}) do if w == stage then return true end end
+    return false
+end
+
+local function catchFish(overrides)
+    local f = { species = 'bass', label = 'Bass', weight = 2.0, quality = 3, xp = 10 }
+    for k, v in pairs(overrides or {}) do f[k] = v end
+    return f
+end
+
+-- Loads the whole settlement stack for real: progression + rewards (+ session and
+-- its dependencies for the group O integration tests). Only the inventory bridge,
+-- the fish roll and the DB are mocked.
+local function loadSettlement(opts)
+    opts = opts or {}
+    installHost()
+    Config = baseConfig()
+    Config.RequireAssembly = false
+    Config.RequireZone = false
+    Config.Durability = false
+    Config.RareLoot = opts.rareLoot or {}
+    Config.Fish = {
+        bass = { label = 'Bass', price = 100, xp = 10, behavior = 'steady_light',
+            rarity = 'common', weight = { min = 1, max = 3 }, water = { 'lake' } },
+    }
+    Rewards, Progression, Generator = nil, nil, nil
+
+    local inv = opts.inv or { [5] = {
+        [1] = { name = 'fishing_rod_common', count = 1 },
+        [2] = { name = 'worm', count = 5 },
+    } }
+    local Z = makeZfishing({ mode = opts.mode or 'enhanced', inv = inv })
+    local realAdd = Z.AddItem
+    Z.AddItem = function(src, item, count, meta)
+        local isFish = tostring(item):sub(1, 5) == 'fish_'
+        if isFish and opts.failFishAdd then return false end
+        if not isFish and opts.failLootAdd then return false end
+        return realAdd(src, item, count, meta)
+    end
+    Zfishing = Z
+
+    Generator = { Roll = function()
+        return { species = 'bass', label = 'Bass', weight = opts.fishWeight or 2.0, quality = 3,
+            rarity = 'common', behavior = 'steady_light', biteDelay = 100, hookWindow = 1500,
+            tensionDiff = 1.0, fishEnergy = 50, xp = opts.fishXp or 10, price = 100 }
+    end }
+
+    dofile('shared/util.lua')
+    dofile('shared/rig_rules.lua')
+    dofile('server/rig.lua')
+    dofile('server/progression.lua')
+    dofile('server/rewards.lua')
+    if opts.withSession then dofile('server/session.lua') end
+    return inv
+end
+
+test('N1 a fish that never reaches the inventory is not committed', function()
+    loadSettlement({ failFishAdd = true })
+    Progression.Load(5)
+    local res = Rewards.GiveCatch(5, catchFish(), 'Lake')
+    equal(res.ok, false)
+    equal(res.committed, false, 'nothing was granted, so nothing is committed')
+    equal(res.reason, 'inv_full')
+    equal(Progression.Get(5).xp, 0, 'an uncommitted catch grants no XP')
+    falsy(findLine(spy.sql, 'INSERT INTO zfishing_catches'), 'and logs no catch')
+end)
+
+test('N2 a committed catch persists XP and logs the catch with no warnings', function()
+    loadSettlement()
+    Progression.Load(5)
+    local res = Rewards.GiveCatch(5, catchFish(), 'Lake')
+    truthy(res.ok); truthy(res.committed)
+    equal(#res.warnings, 0, 'the happy path reports nothing to an operator')
+    equal(Progression.Get(5).xp, 10)
+    truthy(findLine(spy.sql, 'UPDATE zfishing_players'), 'XP was written')
+    truthy(findLine(spy.sql, 'INSERT INTO zfishing_catches'), 'the catch was logged')
+end)
+
+test('N3 an XP write that does not land keeps the catch committed', function()
+    loadSettlement()
+    Progression.Load(5)
+    _G.MySQL.update = sqlNode(nil)              -- oxmysql returned nothing at all
+    local res
+    local lines = capturePrints(function() res = Rewards.GiveCatch(5, catchFish(), 'Lake') end)
+    truthy(res.committed, 'the fish is in the bag -- the catch stands')
+    truthy(hasWarning(res, 'xp_save_failed'), 'and the failure is reported as a warning')
+    truthy(findLine(lines, 'stage=xp_save_failed'), 'with a console line naming the stage')
+end)
+
+test('N4 an XP write that raises keeps the catch committed', function()
+    loadSettlement()
+    Progression.Load(5)
+    _G.MySQL.update = raisingNode('db connection lost')
+    local res
+    local lines = capturePrints(function() res = Rewards.GiveCatch(5, catchFish(), 'Lake') end)
+    truthy(res.committed, 'a raised stage must not un-commit the catch')
+    truthy(hasWarning(res, 'xp_save_failed'))
+    truthy(findLine(lines, 'db connection lost'), 'the cause is printed, not swallowed')
+end)
+
+test('N5 a catch log that fails keeps the catch committed', function()
+    loadSettlement()
+    Progression.Load(5)
+    _G.MySQL.insert = sqlNode(nil)
+    local res
+    capturePrints(function() res = Rewards.GiveCatch(5, catchFish(), 'Lake') end)
+    truthy(res.committed)
+    truthy(hasWarning(res, 'catch_log_failed'))
+    falsy(hasWarning(res, 'xp_save_failed'), 'stages are independent -- one failing does not tar the others')
+end)
+
+test('N6 rare loot that will not fit keeps the main catch committed', function()
+    local inv = loadSettlement({
+        failLootAdd = true,
+        rareLoot = { { item = 'pearl', chance = 1.0, label = 'Pearl' } },   -- always rolls
+    })
+    Progression.Load(5)
+    local res
+    capturePrints(function() res = Rewards.GiveCatch(5, catchFish(), 'Lake') end)
+    truthy(res.committed, 'the fish is what the player caught; the loot is a bonus')
+    truthy(hasWarning(res, 'rare_loot_failed'))
+    local fish = false
+    for _, s in pairs(inv[5]) do if s.name == 'fish_bass' then fish = true end end
+    truthy(fish, 'and the fish is really in the inventory')
+end)
+
+test('N7 a player who dropped mid-settle produces no warning noise', function()
+    loadSettlement()
+    -- no Progression.Load: the cache is empty, exactly as it is after Unload
+    local res
+    local lines = capturePrints(function() res = Rewards.GiveCatch(5, catchFish(), 'Lake') end)
+    truthy(res.committed)
+    equal(#res.warnings, 0,
+        'an expected disconnect must not warn, or operators learn to ignore the line')
+    falsy(findLine(lines, 'catch settlement warning'))
+end)
+
+test('N8 a 0-XP species is not reported as a failed XP write', function()
+    -- ConfigSchema clamps xp to 0..100000, so 0 is reachable; MySQL reports 0
+    -- changed rows for a write of identical values, which is a success
+    loadSettlement()
+    Progression.Load(5)
+    _G.MySQL.update = sqlNode(0)
+    local res = Rewards.GiveCatch(5, catchFish({ xp = 0 }), 'Lake')
+    truthy(res.committed)
+    equal(#res.warnings, 0, '0 affected rows is a write that worked, not a failure')
+end)
+
+-- =============================================================== GROUP O
+-- Claim integration over the REAL reward path (session.lua + rewards.lua)
+
+test('O1 a committed catch reports success and spends one rate slot', function()
+    loadSettlement({ withSession = true })
+    Config.RateLimit = 1
+    local cast = CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+    local claim = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    truthy(claim.ok, 'the catch settles')
+    equal(claim.fish.species, 'bass')
+    equal(CB['zfishing:cast'](5, 0.5).reason, 'rate', 'the committed catch spent the only slot')
+end)
+
+test('O2 an inv_full claim reports inv_full and spends no rate slot', function()
+    loadSettlement({ withSession = true, failFishAdd = true })
+    Config.RateLimit = 1
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+    local claim = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    falsy(claim.ok)
+    equal(claim.reason, 'inv_full')
+
+    local again = CB['zfishing:cast'](5, 0.5)
+    truthy(again.reason ~= 'rate',
+        'a catch the player never received must not cost them a successful-catch slot')
+end)
+
+test('O3 a secondary failure still reports a successful catch to the client', function()
+    loadSettlement({ withSession = true })
+    _G.MySQL.update = raisingNode('db connection lost')
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local claim
+    local lines = capturePrints(function()
+        claim = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    truthy(claim.ok, 'the player is told they caught the fish, because they did')
+    truthy(claim.fish)
+    truthy(findLine(lines, 'committed=true'))
+    truthy(findLine(lines, 'stage=xp_save_failed'), 'the operator sees what failed')
+end)
+
+test('O4 a raise before the commit point answers settle_failed and frees the session', function()
+    -- enhanced mode formats the item description from the rolled quality, and
+    -- quality is the one rolled field nothing touches before settlement -- a
+    -- malformed roll raises there, BEFORE any item is granted. This is the shape
+    -- that still reaches the backstop pcall now that every secondary stage guards
+    -- itself; if it ever stops raising, settle_failed is unreachable and the docs
+    -- must say so rather than implying a stage failure produces it.
+    loadSettlement({ withSession = true, mode = 'enhanced' })
+    Generator.Roll = function()
+        return { species = 'bass', label = 'Bass', weight = 2.0, quality = nil,
+            rarity = 'common', behavior = 'steady_light', biteDelay = 100, hookWindow = 1500,
+            tensionDiff = 1.0, fishEnergy = 50, xp = 10, price = 100 }
+    end
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    local claim
+    capturePrints(function() claim = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil) end)
+    falsy(claim.ok)
+    equal(claim.reason, 'settle_failed')
+    truthy(CB['zfishing:cast'](5, 0.5).ok, 'and the session is not stranded in settling')
+end)
+
+test('O5 a claim replayed during a secondary stage grants no second fish', function()
+    local inv = loadSettlement({ withSession = true })
+    local cast = CB['zfishing:cast'](5, 0.5)
+    TIMERS[1].fn()
+    truthy(CB['zfishing:hook'](5, cast.sessionId).ok)
+    _G.__NOW = _G.__NOW + 6000
+
+    -- park inside the catch-log stage, i.e. AFTER the fish was granted
+    _G.MySQL.insert = setmetatable({ await = function() coroutine.yield(); return 1 end },
+        { __call = function() return 1 end })
+
+    local first = coroutine.create(function()
+        return CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    end)
+    truthy(coroutine.resume(first))
+    equal(coroutine.status(first), 'suspended', 'the settlement is parked in a secondary stage')
+
+    local replay = CB['zfishing:claim'](5, cast.sessionId, 6000, true, nil)
+    falsy(replay.ok, 'the replay is refused while the settlement is still running')
+
+    truthy(select(2, coroutine.resume(first)).ok)
+    local fish = 0
+    for _, s in pairs(inv[5]) do if s.name == 'fish_bass' then fish = fish + (s.count or 1) end end
+    equal(fish, 1, 'exactly one fish was granted')
+end)
+
+-- =============================================================== GROUP P
+-- Sale reconciliation logging (rewards.lua)
+-- A failed payout is the one path where a player can be left short. What the
+-- console prints is the only record an admin has to make them whole.
+
+test('P1 a payout failure whose compensation works logs no CRITICAL line', function()
+    local inv = { [5] = { [1] = fishSlot('fish_bass', 1, 2.0) } }
+    loadRewards({ inv = inv })
+    Zfishing.AddMoney = function() return false end
+
+    local res
+    local lines = capturePrints(function() res = CB['zfishing:sellAll'](5) end)
+    equal(res.reason, 'payout_failed')
+    local summary = findLine(lines, 'sale payout failed')
+    truthy(summary, 'the failure is recorded')
+    truthy(summary:find('restored=1', 1, true), 'with what was handed back')
+    truthy(summary:find('restoreFailed=0', 1, true))
+    truthy(summary:find('expectedPayout=200', 1, true), 'and what the sale was worth')
+    falsy(findLine(lines, 'CRITICAL'), 'nobody lost anything, so nothing is critical')
+end)
+
+test('P2 a compensation that also fails logs everything needed to reconcile', function()
+    loadRewards({ inv = { [5] = { [1] = fishSlot('fish_bass', 2, 2.0) } } })
+    Zfishing.AddMoney = function() return false end
+    Zfishing.AddItem = function() return false end      -- the fish cannot go back either
+
+    local res
+    local lines = capturePrints(function() res = CB['zfishing:sellAll'](5) end)
+    equal(res.reason, 'payout_failed')
+    local summary = findLine(lines, 'sale payout failed')
+    truthy(summary and summary:find('restoreFailed=1', 1, true))
+
+    local critical = findLine(lines, 'CRITICAL sale reconciliation')
+    truthy(critical, 'a player is down fish with nothing to show for it -- that is critical')
+    truthy(critical:find('item=fish_bass', 1, true), 'the item')
+    truthy(critical:find('count=2', 1, true), 'the count')
+    truthy(critical:find('2.0kg/3 star', 1, true), 'the per-catch metadata')
+    truthy(critical:find('expectedPayout=400', 1, true), 'and what it was worth')
+
+    local saleId = summary:match('saleId=(%S+)')
+    truthy(saleId and critical:find('saleId=' .. saleId, 1, true),
+        'both lines carry the same saleId so they can be tied together')
+end)
+
+test('P3 every sale attempt gets its own id', function()
+    loadRewards({ inv = { [5] = {
+        [1] = fishSlot('fish_bass', 1, 2.0), [2] = fishSlot('fish_trout', 1, 2.0),
+    } } })
+    Zfishing.AddMoney = function() return false end
+
+    local ids = {}
+    for i = 1, 2 do
+        local lines = capturePrints(function() CB['zfishing:sellAll'](5) end)
+        local line = findLine(lines, 'sale payout failed')
+        truthy(line, 'attempt ' .. i .. ' logged')
+        ids[i] = line:match('saleId=(%S+)')
+        _G.__NOW = _G.__NOW + 4000                  -- past the sell flood window
+    end
+    truthy(ids[1] ~= ids[2], 'two sales must not share a correlation id')
+end)
+
 -- ---------------------------------------------------------------- runner
 local failures = 0
 for _, entry in ipairs(tests) do
