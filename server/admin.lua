@@ -17,12 +17,22 @@ lib.callback.register('zfishing:admin:getConfig', function(src)
             RareLoot = Config.RareLoot, DefaultWater = Config.DefaultWater,
             RequireZone = Config.RequireZone,
             RodCanBreak = Config.RodCanBreak, RequireAssembly = Config.RequireAssembly,
+            EncounterMode = Config.EncounterMode, ForcedEncounter = Config.ForcedEncounter,
         },
         zones = Store.zonesPayloadWithId(),
         fish = Config.Fish,
         equipment = Config.Equipment,
         rarity = Config.Rarity,
         waterTypes = Config.Admin.waterTypes,
+        -- The registry travels to the admin UI so the panel never hardcodes an
+        -- encounter list that would drift from shared/encounters.lua. Admin payload
+        -- only -- Store's clientPayload() deliberately carries none of this, because it
+        -- broadcasts to every player and encounter selection is a server decision.
+        encounters = {
+            modes       = Encounters.MODES,
+            forceable   = Encounters.FORCEABLE,
+            recommended = Encounters.RECOMMENDED,
+        },
     }
 end)
 

@@ -72,6 +72,10 @@ function Generator.Roll(src, ctx)
         biteDelay   = math.random(Config.Timings.biteMin, Config.Timings.biteMax),
         hookWindow  = math.floor(Config.Timings.hookWindow * rar.hookMult * (hookCfg.hookMod or 1)),
         tensionDiff = rar.tension,
+        -- Normalized 1..5 encounter difficulty. A pure function of the rolled fish, so
+        -- it is identical no matter which encounter type the resolver goes on to pick
+        -- -- that is what keeps a legendary fish legendary under RANDOM and FORCED.
+        difficulty  = Encounters.TierFor(fish.rarity, weight, fish.weight.min, fish.weight.max),
         -- heavier = longer fight, capped so the min plausible reel time always
         -- fits inside Config.Timings.reelTimeout (uncapped, a 400kg shark would
         -- need longer than the timeout and become uncatchable)

@@ -13,6 +13,11 @@ local gate = ZUtil.MakeRateGate({
     hook   = { max = 5, window = 2000 },
     claim  = { max = 3, window = 3000 },
     anchor = { max = 5, window = 5000 },
+    -- Sized from counter-pull, the busiest encounter: a tier-5 fight is on the order of
+    -- 28 counters plus fatigue reels across ~31s, and MakeRateGate is a FIXED window,
+    -- so what matters is the busiest 10s slice, not the whole-fight average. Re-check
+    -- this number against the final tier table when counter-pull lands (Phase B).
+    encounter = { max = 40, window = 10000 },
 })
 
 local function reset(src) sessions[src] = nil end
@@ -42,6 +47,19 @@ local function sessionFor(src, sessionId)
     if not s or type(sessionId) ~= 'string' or s.id ~= sessionId then return nil end
     return s
 end
+
+-- server/encounter.lua never reads `sessions` directly: it resolves through the same
+-- token check every other transition uses, and shares this file's flood gate.
+--
+-- Called with a src (the action callback) it is the full token check. Called without
+-- one (the expiry timer, which outlives the request that armed it) it looks the session
+-- up by id and the caller re-checks object identity before touching anything.
+Encounter.Session = function(sessionId, src)
+    if src ~= nil then return sessionFor(src, sessionId) end
+    for _, s in pairs(sessions) do if s.id == sessionId then return s end end
+    return nil
+end
+Encounter.Gate = function(src) return gate.allow(src, 'encounter') end
 
 local function withinRate(src)
     local now = os.time()
@@ -155,6 +173,15 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
     })
     if not fish then return { ok = false, reason = 'empty_water' } end
 
+    -- Resolved ONCE, here, and frozen into the session below. Nothing downstream reads
+    -- Config.EncounterMode again for this session -- that is what lets an admin change
+    -- the mode without altering a fight already in progress.
+    local encType, encMode, encDowngraded = Encounter.ResolveForSession(fish)
+    if encDowngraded then
+        print(('[zfishing] encounter %s has no module deployed; using %s instead')
+            :format(encDowngraded, encType))
+    end
+
     -- float speeds up (or slows down) the wait for a bite
     if stats and stats.floatBiteSpeed and stats.floatBiteSpeed > 0 then
         fish.biteDelay = math.max(500, math.floor(fish.biteDelay / stats.floatBiteSpeed))
@@ -188,6 +215,8 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
         lineRating = stats and stats.lineRating or resolveLineRating(src, level),
         reelDrain = stats and stats.reelDrain or nil,
         rigSlot = rigSlot,
+        -- type and difficulty are frozen at cast; the challenge state is built at hook
+        encounter = { type = encType, mode = encMode, difficulty = fish.difficulty or 1 },
         castAt = GetGameTimer(), zone = zone.name,
     }
 
@@ -211,6 +240,10 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
             baseDrain = Config.Minigame.baseDrain,   -- authoritative; the server validates against it
             reelTimeout = Config.Timings.reelTimeout, -- single source of truth for the fight clock
             fishWeight = fish.weight,          -- actual rolled weight for NUI dynamics
+            -- which fight to render. NOT the mode: the client has no business knowing
+            -- the global selection policy, only which encounter it was handed.
+            encounter = s.encounter.type,
+            difficulty = s.encounter.difficulty,
         })
         -- if the player never presses hook, don't leave the session stuck
         SetTimeout(fish.hookWindow + Config.Timings.hookLatency + 2000, function()
@@ -235,7 +268,16 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
     end
     s.state = 'reeling'
     s.reelStart = GetGameTimer()
-    return { ok = true }
+    -- A legacy session mints no challenge: its fight runs client-side exactly as before.
+    local challengeId
+    if s.encounter and s.encounter.type ~= Encounters.FALLBACK then
+        challengeId = Encounter.Begin(s, {
+            lineRating = s.lineRating,
+            reelDrain  = s.reelDrain or 1.0,
+            greenZone  = (Config.Equipment.rods[s.rod] or {}).greenZone or 0.0,
+        })
+    end
+    return { ok = true, challengeId = challengeId }
 end)
 
 lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)
@@ -245,32 +287,51 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     if s.state ~= 'reeling' then return { ok = false } end
     local fish = s.fish
 
-    -- Minimum plausible reel time. The NUI drains baseDrain * drainRate energy
-    -- per second while in the green zone, so a real catch can never finish
-    -- faster than this. drainRate defaults to 1.0 to match exactly what the bite
-    -- payload told the client -- assuming a faster reel here would hand every
-    -- non-assembly player a 1.7x discount on the floor.
-    local drain = s.reelDrain or 1.0
-    local minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000
-    local elapsed = GetGameTimer() - s.reelStart
-    -- 0.9 rather than a tighter value only to absorb frame quantisation: minMs
-    -- assumes a perfect green-zone hold for the whole fight, and network latency
-    -- only ever increases the elapsed time the server measures.
-    if success and elapsed < minMs * 0.9 then
-        reset(src); return { ok = false, reason = 'too_fast' }
-    end
-    if elapsed > Config.Timings.reelTimeout + 5000 then
-        reset(src); return { ok = false, reason = 'timeout' }
+    local encounter = (s.encounter and s.encounter.type ~= Encounters.FALLBACK) and s.encounter or nil
+
+    if encounter then
+        -- The server counted every action itself, so there is nothing left to take on
+        -- trust. `success` and `reason` arrived from the client and are discarded --
+        -- the plausibility floor in the else branch exists only because the LEGACY
+        -- fight runs entirely client-side.
+        if not encounter.outcome then return { ok = false, reason = 'encounter_active' } end
+        success = (encounter.outcome == 'success')
+        reason  = success and nil or encounter.outcome
+        -- The encounter's own deadline, not Config.Timings.reelTimeout: a turn-based
+        -- tier-5 fight legitimately runs longer than the legacy reel clock allows.
+        if GetGameTimer() > encounter.expiresAt + 5000 then
+            reset(src); return { ok = false, reason = 'timeout' }
+        end
+    else
+        -- Minimum plausible reel time. The NUI drains baseDrain * drainRate energy
+        -- per second while in the green zone, so a real catch can never finish
+        -- faster than this. drainRate defaults to 1.0 to match exactly what the bite
+        -- payload told the client -- assuming a faster reel here would hand every
+        -- non-assembly player a 1.7x discount on the floor.
+        local drain = s.reelDrain or 1.0
+        local minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000
+        local elapsed = GetGameTimer() - s.reelStart
+        -- 0.9 rather than a tighter value only to absorb frame quantisation: minMs
+        -- assumes a perfect green-zone hold for the whole fight, and network latency
+        -- only ever increases the elapsed time the server measures.
+        if success and elapsed < minMs * 0.9 then
+            reset(src); return { ok = false, reason = 'too_fast' }
+        end
+        if elapsed > Config.Timings.reelTimeout + 5000 then
+            reset(src); return { ok = false, reason = 'timeout' }
+        end
     end
 
     if not success then
         -- fish escaped / line broke: legit outcome, bait already consumed.
-        -- a snapped line destroys the fitted line component for real.
+        -- a snapped line destroys the fitted line component for real. For an encounter
+        -- session `reason` is the SERVER's outcome, assigned above -- the client no
+        -- longer has any say in whether the line component is destroyed.
         if reason == 'snap' and s.rigSlot then
             Rig.breakLine(src, s.rigSlot)
             TriggerClientEvent('zfishing:rig:notify', src, 'line_broke')
         end
-        reset(src); return { ok = true, fish = nil }
+        reset(src); return { ok = true, fish = nil, outcome = reason }
     end
 
     -- Lock the session BEFORE the first yield. GiveCatch does AddItem +
@@ -284,7 +345,8 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     -- session: without it an error would park sessions[src] in 'settling' with
     -- nothing able to clear it and leave the player on `busy` until they reconnect.
     local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone,
-        { sessionId = s.id, identifier = s.identifier })
+        { sessionId = s.id, identifier = s.identifier,
+          perfScore = encounter and Encounter.PerfScore(encounter) or nil })
     local committed = settled and type(res) == 'table' and res.committed == true
     local reason = (settled and type(res) == 'table' and res.reason) or nil
 

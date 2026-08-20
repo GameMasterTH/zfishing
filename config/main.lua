@@ -22,6 +22,12 @@ Config.Timings = {
 Config.Minigame = {
     baseDrain = 12.0,   -- energy drained per second while the tension is in the green zone
 }
+-- Which fight a hooked fish becomes. 'default' = the fish decides (and a fish with no
+-- `encounter` field keeps the legacy tension minigame), 'random' = the server picks
+-- from the encounter pool per cast, 'forced' = every catch uses ForcedEncounter.
+-- Server-owned: the client is never told the mode, only which encounter it is playing.
+Config.EncounterMode = 'default'
+Config.ForcedEncounter = 'counter_pull'
 Config.CastMaxDistance = 25.0             -- meters at full power
 -- true  = fishing only works inside a Config.Zones entry (current default)
 -- false = falls back to open water anywhere, using Config.DefaultWater as the pool

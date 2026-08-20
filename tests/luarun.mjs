@@ -28,17 +28,22 @@ if (!testFile) {
 }
 
 // Every resource file the harness may `dofile`, mounted at its root-relative path.
-// The test itself plus all shipped Lua under client/, server/ and shared/ so any
-// test (client- or server-side) resolves `dofile('server/foo.lua')` to real code.
-const luaDirs = ['client', 'server', 'shared'];
-const filesToMount = [testFile];
+// The test itself, all shipped Lua under client/, server/ and shared/, and the other
+// files in tests/ so a suite can `dofile('tests/harness.lua')` for the shared scaffold.
+// Non-recursive on purpose: a module in a subdirectory would be invisible here, which
+// is why the resource keeps its Lua flat.
+const luaDirs = ['client', 'server', 'shared', 'tests'];
+const mountList = [testFile];
 for (const dir of luaDirs) {
     const abs = join(RESOURCE_ROOT, dir);
     if (!existsSync(abs)) continue;
     for (const name of readdirSync(abs)) {
-        if (name.endsWith('.lua')) filesToMount.push(`${dir}/${name}`);
+        if (name.endsWith('.lua')) mountList.push(`${dir}/${name}`);
     }
 }
+// testFile is also picked up by the tests/ sweep above
+const seen = new Set();
+const filesToMount = mountList.filter((f) => (seen.has(f) ? false : (seen.add(f), true)));
 
 const out = [];
 const log = (s) => { out.push(s); process.stdout.write(s + '\n'); };

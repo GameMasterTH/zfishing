@@ -150,6 +150,8 @@ end
 local function loadValidate()
     installHost()
     Config = baseConfig()
+    -- config_schema's encounter enums and its fish whitelist both read the registry
+    dofile('shared/encounters.lua')
     dofile('server/config_schema.lua')
     dofile('server/validate.lua')
 end
@@ -297,6 +299,8 @@ local function loadAdmin(isAdminResult)
         IsAdmin = function(_, src, ace) adminCalls[#adminCalls + 1] = { src = src, ace = ace }; return isAdminResult end,
         Notify = function() end,
     } }
+    -- admin:getConfig ships the registry to the panel
+    dofile('shared/encounters.lua')
     dofile('server/admin.lua')
     return storeCalls, adminCalls
 end
@@ -631,6 +635,9 @@ local function loadSession(opts)
     end }
     dofile('shared/util.lua')
     dofile('shared/rig_rules.lua')
+    -- session.lua resolves and freezes an encounter at cast time
+    dofile('shared/encounters.lua')
+    dofile('server/encounter.lua')
     dofile('server/rig.lua')
     dofile('server/session.lua')
     return inv, rewardCalls
@@ -907,11 +914,13 @@ local function loadAllServerModulesAtBoot()
         GetIdentifier = function() return { ok = true, effects = { details = { identifier = 'license:test' } } } end,
     } }
     dofile('shared/util.lua')
+    dofile('shared/encounters.lua')
     dofile('server/config_schema.lua')
     dofile('server/validate.lua')
     dofile('server/lib.lua')
     dofile('server/store.lua')
     dofile('server/generator.lua')
+    dofile('server/encounter.lua')
     dofile('server/progression.lua')
     dofile('server/rewards.lua')
     dofile('shared/rig_rules.lua')
