@@ -112,7 +112,12 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
     if not withinRate(src) then return { ok = false, reason = 'rate' } end
     if type(power) ~= 'number' or power < 0 or power > 1 then return { ok = false } end
 
-    if not Progression.Get(src) then Progression.Load(src) end
+    -- Load yields on its DB work and refuses when the src changed owner across it,
+    -- so its answer has to be read -- a discarded false leaves prog nil and the
+    -- next line indexing it.
+    if not Progression.Get(src) and not Progression.Load(src) then
+        return { ok = false, reason = 'no_identity' }
+    end
     local prog = Progression.Get(src)
     -- A session that can end in a reward has to be tied to a stable identity, not
     -- just to the src it was cast from. Settlement survives yields and FiveM

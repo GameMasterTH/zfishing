@@ -10,15 +10,35 @@ function Progression.LevelForXP(xp)
     return lvl
 end
 
+-- Loads (or creates) the progression row for whoever holds `src`, and reports
+-- whether cache[src] was actually committed for that player.
+--
+-- IdentityState below protects operations that run AFTER the cache exists. This
+-- function has to protect the CREATION of the cache, which is a different
+-- boundary and cannot use IdentityState -- there is nothing to compare against
+-- yet. So it captures the canonical runtime identifier first and re-reads it
+-- after the DB work: the awaits yield, and across them the player can drop and
+-- FiveM can hand `src` to somebody else. Committing then would file A's xp and
+-- level under B's src and poison every later identity comparison, because all of
+-- them ultimately trust cache[src].identifier.
+--
+-- ONE check, immediately above the assignment -- the assignment is the mutation.
+-- A second check between the SELECT and the INSERT would only avoid an unused
+-- `zfishing_players` row for A (harmless: it is A's own row, and A picks it up on
+-- their next load) at the cost of making the mutation test unable to fail.
 function Progression.Load(src)
-    local id = Zfishing.Identifier(src)
-    if not id then return end
-    local row = MySQL.single.await('SELECT xp, level, stats FROM zfishing_players WHERE identifier = ?', { id })
+    local expected = Zfishing.Identifier(src)
+    if type(expected) ~= 'string' then return false end
+    local row = MySQL.single.await('SELECT xp, level, stats FROM zfishing_players WHERE identifier = ?', { expected })
     if not row then
-        MySQL.insert.await('INSERT INTO zfishing_players (identifier, xp, level) VALUES (?, 0, 1)', { id })
+        MySQL.insert.await('INSERT INTO zfishing_players (identifier, xp, level) VALUES (?, 0, 1)', { expected })
         row = { xp = 0, level = 1, stats = nil }
     end
-    cache[src] = { identifier = id, xp = row.xp, level = row.level, stats = row.stats and json.decode(row.stats) or {} }
+    -- decoded above the guard so nothing at all sits between it and the commit
+    local stats = row.stats and json.decode(row.stats) or {}
+    if Zfishing.Identifier(src) ~= expected then return false end
+    cache[src] = { identifier = expected, xp = row.xp, level = row.level, stats = stats }
+    return true
 end
 
 function Progression.Get(src) return cache[src] end
@@ -87,7 +107,13 @@ end)
 RegisterCommand('zfish_xp', function(src)
     if src == 0 then return end
     if not exports.zcore_lib:IsAdmin(src, 'zfishing.admin') then return end
-    if not Progression.Get(src) then Progression.Load(src) end
+    -- Load can refuse -- no identity, or the src changed owner across its DB
+    -- awaits -- and the notify below dereferences the cache, so a failed load has
+    -- to stop here rather than index a nil.
+    if not Progression.Get(src) and not Progression.Load(src) then
+        exports.zcore_lib:Notify(src, 'Your player identity could not be verified', 'error')
+        return
+    end
     Progression.AddXP(src, 50)
     Progression.Save(src)
     local c = Progression.Get(src)

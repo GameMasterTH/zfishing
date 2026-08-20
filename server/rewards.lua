@@ -186,7 +186,11 @@ local function collectSale(src, samePlayer)
                 local price = Rewards.Price(species, slot.metadata) * count
                 if price > 0 and Zfishing.RemoveItemSlot(src, item, count, slot.slot) then
                     total = total + price
-                    removed[#removed + 1] = { item = item, count = count, metadata = slot.metadata }
+                    -- `value` is what THIS stack was worth, not the sale total. A
+                    -- reconciliation where two of three stacks came back is
+                    -- unreadable without it: an admin would have to re-price the
+                    -- lost stack by hand to know what is still owed.
+                    removed[#removed + 1] = { item = item, count = count, metadata = slot.metadata, value = price }
                 end
             end
         end
@@ -200,7 +204,7 @@ local function collectSale(src, samePlayer)
                 local price = Rewards.Price(species, { weight = avgWeight, quality = 3 }) * count
                 if Zfishing.RemoveItem(src, item, count) then
                     total = total + price
-                    removed[#removed + 1] = { item = item, count = count }
+                    removed[#removed + 1] = { item = item, count = count, value = price }
                 end
             end
         end
@@ -223,21 +227,64 @@ local function metaSummary(meta)
     return ('%skg/%s star'):format(tostring(tonumber(meta.weight) or '?'), tostring(meta.quality or '?'))
 end
 
+local function sumValue(list)
+    local n = 0
+    for _, r in ipairs(list) do n = n + (r.value or 0) end
+    return n
+end
+
+-- One CRITICAL line per stack that left the original player's inventory and did
+-- not get back into it. Both value figures are on the line on purpose:
+--   lostValue       what THIS stack was worth -- the amount still owed for it
+--   expectedPayout  what the WHOLE sale was worth
+-- The sale total alone is ambiguous the moment part of a sale was recovered, and
+-- the console record is the only reconciliation mechanism this resource offers.
+local function logLostStacks(sale, stage, lost, total)
+    for _, r in ipairs(lost) do
+        print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s identity=%s stage=%s lost item=%s count=%s meta=%s lostValue=%d expectedPayout=%d')
+            :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage,
+                r.item, tostring(r.count), metaSummary(r.metadata), r.value or 0, total))
+    end
+end
+
 -- The fish are already out of the inventory when the payout is attempted, so a
 -- failed AddMoney must hand them back -- the resource never destroys an item
--- silently (same rule as rig attach/detach). Reports what it managed rather than
--- printing and forgetting, so the caller can log one reconciliation record per
--- sale instead of scattered lines with no correlation.
-local function restoreSale(src, removed)
-    local restored, failed = 0, {}
-    for _, r in ipairs(removed) do
+-- silently (same rule as rig attach/detach).
+--
+-- `samePlayer()` is re-checked before EVERY AddItem, not once before the loop.
+-- Each AddItem crosses the zcore_lib resource boundary and yields, so a src that
+-- changes hands after the first stack is back would have every remaining stack
+-- materialise in the REPLACEMENT occupant's bag. On identity loss the loop stops
+-- dead -- it does not keep restoring, does not retry, and does not hand the rest
+-- to whoever holds the src now. What is already back stays back; what is still
+-- out becomes a reconciliation item for the player who is owed it.
+--
+-- Reports lists rather than counts, and prints nothing: the caller owns the
+-- saleId, so it is the only scope that can emit correlated records -- and an
+-- admin needs to know exactly WHICH stacks are outstanding and what each is
+-- worth, which a pair of integers cannot say.
+local function restoreSale(src, removed, samePlayer)
+    local restored, failed, remaining = {}, {}, {}
+    for i, r in ipairs(removed) do
+        if not samePlayer() then
+            for j = i, #removed do remaining[#remaining + 1] = removed[j] end
+            break
+        end
         if Zfishing.AddItem(src, r.item, r.count, r.metadata) then
-            restored = restored + 1
+            restored[#restored + 1] = r
         else
             failed[#failed + 1] = r
         end
     end
-    return { restored = restored, failed = failed }
+    return {
+        identityLost = #remaining > 0,
+        restored = restored, failed = failed, remaining = remaining,
+        restoredValue = sumValue(restored),
+        -- everything that left the bag and is not back in it, whichever way it was
+        -- lost. The accounting an admin reconstructs from the log is:
+        --   removedValue (== expectedPayout) = restoredValue + unreconciledValue
+        unreconciledValue = sumValue(failed) + sumValue(remaining),
+    }
 end
 
 -- Is the player on this src still the one this sale was opened for?
@@ -263,14 +310,13 @@ end
 -- window is a disconnect landing between two specific yields of one manual NPC
 -- interaction, and the reconciliation philosophy already in place for a failed
 -- payout is "one correlated record an admin can act on", not "roll it back".
+--
+-- Nothing was restored on this path, so everything that left the bag is still
+-- outstanding: restoredValue is 0 and unreconciledValue is the whole of `removed`.
 local function abortSale(sale, stage, total, removed)
-    print(('[zfishing] sale aborted on identity loss saleId=%s src=%s identity=%s stage=%s expectedPayout=%d removed=%d')
-        :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage, total, #removed))
-    for _, r in ipairs(removed) do
-        print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s identity=%s stage=%s lost item=%s count=%s meta=%s expectedPayout=%d')
-            :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage,
-                r.item, tostring(r.count), metaSummary(r.metadata), total))
-    end
+    print(('[zfishing] sale aborted on identity loss saleId=%s src=%s identity=%s stage=%s expectedPayout=%d removed=%d restoredValue=0 unreconciledValue=%d')
+        :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage, total, #removed, sumValue(removed)))
+    logLostStacks(sale, stage, removed, total)
     return { ok = false, total = 0, reason = 'sale_failed' }
 end
 
@@ -294,17 +340,24 @@ local function runSale(src, sale)
         -- player's fish materialise in the replacement occupant's bag.
         if not samePlayer() then return abortSale(sale, 'compensation', total, removed) end
 
-        local comp = restoreSale(src, removed)
-        print(('[zfishing] sale payout failed saleId=%s src=%s identity=%s expectedPayout=%d removed=%d restored=%d restoreFailed=%d')
-            :format(sale.id, tostring(src), ZUtil.SafeId(sale.identifier), total, #removed, comp.restored, #comp.failed))
-        -- the only path where a player is actually down fish with nothing to show
-        -- for it; everything an admin needs to make them whole goes on one line
-        for _, r in ipairs(comp.failed) do
-            print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s identity=%s stage=restore_failed lost item=%s count=%s meta=%s expectedPayout=%d')
-                :format(sale.id, tostring(src), ZUtil.SafeId(sale.identifier),
-                    r.item, tostring(r.count), metaSummary(r.metadata), total))
-        end
-        return { ok = false, total = 0, reason = 'payout_failed' }
+        local comp = restoreSale(src, removed, samePlayer)
+        print(('[zfishing] sale payout failed saleId=%s src=%s identity=%s expectedPayout=%d removed=%d restored=%d restoreFailed=%d restoredValue=%d unreconciledValue=%d identityLost=%s')
+            :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), total, #removed,
+                #comp.restored, #comp.failed, comp.restoredValue, comp.unreconciledValue,
+                tostring(comp.identityLost)))
+        -- the only paths where a player is actually down fish with nothing to show
+        -- for it. Two distinct stages, because an admin reads them differently:
+        --   restore_failed   the inventory refused the stack -- the player is still
+        --                    here, and it can be handed back by hand
+        --   restore_aborted  the src changed owner mid-compensation, so the rest was
+        --                    deliberately NOT handed back; the player who is owed it
+        --                    is gone and is named only by `identity=`
+        logLostStacks(sale, 'restore_failed', comp.failed, total)
+        logLostStacks(sale, 'restore_aborted', comp.remaining, total)
+        -- Identity loss collapses to the same generic outcome every other guard
+        -- uses: the client on the other end of this callback may not even be the
+        -- player who opened the sale, so it is not told that a payout failed.
+        return { ok = false, total = 0, reason = comp.identityLost and 'sale_failed' or 'payout_failed' }
     end
 
     if Zfishing.Simple() then

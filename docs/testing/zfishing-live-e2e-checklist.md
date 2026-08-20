@@ -57,7 +57,7 @@ run**, and never infer one row from another.
 
 | # | Steps | Expected | Pass/Fail | Notes |
 |---|---|---|---|---|
-| B1 | Use a rod near water inside a zone, press **E**, cast, wait, press **SPACE** on the bite, reel to a catch | Catch card shows species / weight / quality; the fish is in the inventory; console logs `claim settled session=... reward=true` | | |
+| B1 | Use a rod near water inside a zone, press **E**, cast, wait, press **SPACE** on the bite, reel to a catch | Catch card shows species / weight / quality; the fish is in the inventory; console logs `claim settled session=... src=... species=... committed=true` | | |
 | B2 | Press **Continue** on the catch card | Card closes, NUI focus released, rod animation stops, player unfrozen — one clean teardown | | |
 | B3 | (enhanced mode) Inspect the caught fish item | Metadata carries the same weight/quality the card showed | | |
 | B4 | (simple mode) Inspect the caught fish item | Plain stacked item, no per-catch metadata; no error in console | | |
@@ -102,7 +102,7 @@ run**, and never infer one row from another.
 | E4 | (2 players) Both sell at the same NPC simultaneously | Each is paid for their own fish only | | |
 | E5 | (simple mode) Sell | Extra notification: "Sold at standard weight — this inventory has no per-catch weight" | | |
 | E6 | If you can force a money-add failure (framework offline / account missing), sell | Message "The payment failed — your fish were returned"; **the fish are back in the inventory**; console logs `sale payout failed … restoreFailed=0` and **no** CRITICAL line | | |
-| E7 | Force a money-add failure **and** a full inventory so the fish cannot go back | Console logs one `CRITICAL sale reconciliation` line per lost stack with item, count, metadata and expectedPayout, sharing the `saleId` of the summary line — enough to refund by hand | | |
+| E7 | Force a money-add failure **and** a full inventory so the fish cannot go back | Console logs one `CRITICAL sale reconciliation … stage=restore_failed` line per lost stack with item, count, metadata, `lostValue` (what **that stack** was worth) and `expectedPayout` (the whole sale), sharing the `saleId` of the summary line. The summary carries `restoredValue` and `unreconciledValue`, and `restoredValue + unreconciledValue` must equal `expectedPayout` — enough to refund by hand | | |
 | E8 | Disconnect during a sale (alt-F4 the instant you confirm, repeat until one lands mid-sale) | No console error; the sale either completed before the drop or logged `sale aborted on identity loss` with a `stage=`; the reconnected player can sell again immediately (the lock was released) | | |
 
 ## F. Boats
@@ -138,6 +138,7 @@ mark them **N/A — no tooling** rather than Pass.
 | G10 | Call them as an admin | Both work | | |
 | G11 | **Source reuse, catch.** Land a catch and disconnect inside the settlement window, then have a second player join onto the freed server id fast enough to inherit it | The replacement player receives **no** fish, **no** XP and **no** rare loot. If the id really was reused, the console shows one `identity guard blocked stale settlement … stage=catch_commit` line. Server ids are assigned by the server, so this is usually **N/A — cannot force src assignment** | | |
 | G12 | **Source reuse, sale.** Same, but disconnect during a sale | The replacement player is not paid and receives no restored fish; console shows `sale aborted on identity loss` plus one `CRITICAL sale reconciliation` per stack that left the original player's bag. Usually **N/A — cannot force src assignment** | | |
+| G13 | **Source reuse, sale compensation.** As G12, but disconnect after the payout has already failed and the first stack has gone back | Compensation stops where it was: stacks already returned stay returned, the rest are **not** put into the replacement player's bag. The summary reads `identityLost=true` with `restored=` short of `removed=`, and each withheld stack gets a `CRITICAL sale reconciliation … stage=restore_aborted` line carrying its own `lostValue`. Usually **N/A — cannot force src assignment** | | |
 | G13 | Check every identity/reconciliation line printed during G11–G12 | Identifiers appear redacted (`license:...1234`), never in full | | |
 
 ## H. Admin surface

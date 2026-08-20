@@ -2568,6 +2568,262 @@ test('S5 the happy path logs no settlement warning at all', function()
     equal(countLines(lines, 'claim settled'), 1, 'just the one routine per-claim line')
 end)
 
+-- =============================================================== GROUP T
+-- Source-id reuse while the progression cache is being CREATED (progression.lua)
+--
+-- Progression.IdentityState protects operations that run once cache[src] exists.
+-- Progression.Load has to protect the creation of that entry, which is a
+-- DIFFERENT boundary: there is nothing to compare against yet, so it compares the
+-- canonical runtime identifier captured before its DB awaits against the one the
+-- src answers with after them. A cache committed for the wrong player poisons
+-- every later identity check, because all of them ultimately trust
+-- cache[src].identifier.
+--
+-- These load the REAL progression module. A fake Load would only prove the fake.
+
+-- A MySQL node that runs `onAwait` in the middle of the await -- where the real
+-- driver yields and where a disconnect + src reassignment lands. Nothing inside
+-- progression.lua is monkeypatched; the module runs exactly as shipped.
+local function parkingNode(ret, onAwait)
+    local function run(sql, params)
+        spy.sql[#spy.sql + 1] = sql
+        spy.sqlCalls[#spy.sqlCalls + 1] = { sql = sql, params = params }
+        onAwait()
+        return ret
+    end
+    return setmetatable({ await = run }, { __call = run })
+end
+
+test('T1 a load that keeps the same player commits the cache for them', function()
+    loadSettlement()
+    Zfishing.Identifier = function() return LONG_ID_A end
+    _G.MySQL.single = sqlNode({ xp = 40, level = 2, stats = nil })
+
+    equal(Progression.Load(5), true, 'the ordinary load still succeeds')
+    equal(Progression.Get(5).identifier, LONG_ID_A)
+    equal(Progression.Get(5).xp, 40, 'and carries the row it read')
+end)
+
+test('T2 a player who disappears during the load leaves no cache behind', function()
+    loadSettlement()
+    local id = LONG_ID_A
+    Zfishing.Identifier = function() return id end
+    _G.MySQL.single = parkingNode({ xp = 40, level = 2 }, function() id = nil end)
+
+    equal(Progression.Load(5), false, 'the load reports that it committed nothing')
+    equal(Progression.Get(5), nil, 'nothing is cached under a src nobody is on')
+end)
+
+test('T3 a src reused during the load never caches the old occupant', function()
+    loadSettlement()
+    local id = LONG_ID_A
+    Zfishing.Identifier = function() return id end
+    _G.MySQL.single = parkingNode({ xp = 40, level = 2 }, function() id = LONG_ID_B end)
+
+    equal(Progression.Load(5), false)
+    equal(Progression.Get(5), nil, 'B must not inherit A progression by holding A src')
+    equal(spy.sqlCalls[#spy.sqlCalls].params[1], LONG_ID_A, 'the row read was A own')
+end)
+
+test('T4 identity lost across the new-player INSERT caches nothing, and the row is A own', function()
+    loadSettlement()
+    local id = LONG_ID_A
+    Zfishing.Identifier = function() return id end
+    _G.MySQL.single = sqlNode(nil)                       -- no row yet: new-player branch
+    _G.MySQL.insert = parkingNode(1, function() id = LONG_ID_B end)
+
+    equal(Progression.Load(5), false)
+    equal(Progression.Get(5), nil, 'B inherits nothing')
+    local ins
+    for _, c in ipairs(spy.sqlCalls) do
+        if c.sql:find('INSERT INTO zfishing_players', 1, true) then ins = c end
+    end
+    truthy(ins, 'the new-player row was inserted before the src changed hands')
+    equal(ins.params[1], LONG_ID_A,
+        'an unused row for A is acceptable -- a row A shaped but bound to B would not be')
+end)
+
+test('T5 a cast whose progression load refuses starts no reward-bearing session', function()
+    loadSettlement({ withSession = true })
+    local id = LONG_ID_A
+    Zfishing.Identifier = function() return id end
+    _G.MySQL.single = parkingNode({ xp = 0, level = 1 }, function() id = LONG_ID_B end)
+
+    local cast = CB['zfishing:cast'](5, 0.5)
+    equal(cast.ok, false)
+    equal(cast.reason, 'no_identity', 'the player-facing outcome is unchanged')
+    equal(Progression.Get(5), nil, 'and no cache was committed on the way through')
+    equal(#TIMERS, 0, 'no bite timer, so nothing can settle into a reward later')
+end)
+
+test('T6 the XP QA command survives a load that refuses', function()
+    loadSettlement()
+    local id = LONG_ID_A
+    Zfishing.Identifier = function() return id end
+    _G.MySQL.single = parkingNode({ xp = 0, level = 1 }, function() id = LONG_ID_B end)
+    local kinds = {}
+    _G.exports = { zcore_lib = {
+        IsAdmin = function() return true end,
+        Notify = function(_, _, _, kind) kinds[#kinds + 1] = kind end,
+    } }
+
+    CMD['zfish_xp'](5)          -- used to index a nil cache and raise
+    equal(Progression.Get(5), nil)
+    equal(kinds[1], 'error', 'the admin is told, rather than the command blowing up')
+end)
+
+-- =============================================================== GROUP U
+-- Source-id reuse DURING sale compensation (rewards.lua)
+--
+-- Group R covers identity lost BEFORE compensation starts. Compensation itself is
+-- a loop of AddItem calls that each cross the zcore_lib boundary and yield, so the
+-- window reopens between stacks: the first stack can go back to A and the src can
+-- change owner before the second. Every AddItem therefore re-checks, and the loop
+-- stops dead on loss rather than emptying A sale into B bag.
+--
+-- Three stacks worth DIFFERENT amounts (200 / 450 / 100). Equal-valued stacks
+-- would let a `lostValue` that is really the sale total -- or the value of the
+-- wrong stack -- pass unnoticed, which is the whole point of per-stack value.
+
+-- Pins the sweep order. collectSale walks Config.Fish and the slot list with
+-- `pairs`, so the order stacks are removed in -- and therefore restored in -- is
+-- otherwise undefined, and "the FIRST stack goes back" would pass at random.
+local function threeStackSale()
+    local inv = { [5] = {
+        [1] = fishSlot('fish_bass', 1, 2.0),   -- 100 * 2.0 * 1.0 = 200
+        [2] = fishSlot('fish_bass', 1, 4.5),   -- 100 * 4.5 * 1.0 = 450
+        [3] = fishSlot('fish_bass', 1, 1.0),   -- 100 * 1.0 * 1.0 = 100
+    } }
+    loadRewards({ inv = inv })
+    local ordered = {
+        { slot = 1, name = 'fish_bass', count = 1, metadata = { weight = 2.0, quality = 3 } },
+        { slot = 2, name = 'fish_bass', count = 1, metadata = { weight = 4.5, quality = 3 } },
+        { slot = 3, name = 'fish_bass', count = 1, metadata = { weight = 1.0, quality = 3 } },
+    }
+    Zfishing.Search = function(_, items)
+        if items[1] ~= 'fish_bass' then return {} end
+        return ordered
+    end
+    return inv
+end
+
+-- Runs the three-stack sale to the point where the payout fails and the src is
+-- reused as A first stack goes back. Reports the console lines plus what the
+-- inventory and money bridges actually saw.
+local function compensationIdentityLoss()
+    threeStackSale()
+    local id, seen, payouts = LONG_ID_A, {}, 0
+    Zfishing.Identifier = function() return id end
+    Zfishing.AddMoney = function() payouts = payouts + 1; return false end
+    Zfishing.AddItem = function(_, _, _, meta)
+        seen[#seen + 1] = (meta or {}).weight
+        -- A drops on the resource-boundary yield of this very call
+        if (meta or {}).weight == 2.0 then id = LONG_ID_B end
+        return true
+    end
+    local res
+    local lines = capturePrints(function() res = CB['zfishing:sellAll'](5) end)
+    return { res = res, lines = lines, restored = seen, payouts = payouts }
+end
+
+test('U1 a src reused mid-compensation stops restoring and gives the new occupant nothing', function()
+    local r = compensationIdentityLoss()
+    equal(r.res.reason, 'sale_failed')
+    equal(r.res.total, 0)
+    equal(#r.restored, 1, 'the loop stopped: only the stack already in flight went back')
+    equal(r.restored[1], 2.0, 'and it went back to A, before the src changed hands')
+    equal(r.payouts, 1, 'one payout attempt, which failed -- B is never paid')
+    equal(countLines(r.lines, 'CRITICAL sale reconciliation'), 2,
+        'the two stacks B must not receive are exactly the two still owed to A')
+end)
+
+test('U2 the reconciliation attributes value per stack, not by the sale total', function()
+    local r = compensationIdentityLoss()
+    local summary = findLine(r.lines, 'sale payout failed')
+    truthy(summary, 'the sale is summarised once')
+    truthy(summary:find('expectedPayout=750', 1, true), 'what the whole sale was worth')
+    truthy(summary:find('restored=1', 1, true))
+    truthy(summary:find('restoredValue=200', 1, true), 'what got back to A')
+    truthy(summary:find('unreconciledValue=550', 1, true), 'and what is still owed')
+    truthy(summary:find('identityLost=true', 1, true), 'naming why compensation stopped short')
+
+    local values = {}
+    for _, l in ipairs(r.lines) do
+        if l:find('CRITICAL sale reconciliation', 1, true) then
+            truthy(l:find('stage=restore_aborted', 1, true),
+                'distinct from restore_failed: nothing refused these, they were withheld')
+            values[tonumber(l:match('lostValue=(%d+)'))] = true
+        end
+    end
+    truthy(values[450], 'the 4.5kg stack is booked at 450')
+    truthy(values[100], 'the 1.0kg stack at 100')
+    falsy(values[750], 'a lostValue equal to the sale total means value was never attributed')
+end)
+
+test('U3 a single stack the inventory refuses is booked at its own value', function()
+    threeStackSale()
+    Zfishing.Identifier = function() return LONG_ID_A end
+    Zfishing.AddMoney = function() return false end
+    Zfishing.AddItem = function(_, _, _, meta)
+        return (meta or {}).weight ~= 4.5            -- only the 450 stack will not fit
+    end
+
+    local res
+    local lines = capturePrints(function() res = CB['zfishing:sellAll'](5) end)
+    equal(res.reason, 'payout_failed', 'identity held, so this is an ordinary failed payout')
+
+    local summary = findLine(lines, 'sale payout failed')
+    truthy(summary:find('restored=2', 1, true))
+    truthy(summary:find('restoreFailed=1', 1, true))
+    truthy(summary:find('restoredValue=300', 1, true), '200 + 100 went back')
+    truthy(summary:find('unreconciledValue=450', 1, true), 'only the refused stack is owed')
+    truthy(summary:find('identityLost=false', 1, true))
+
+    local crit = findLine(lines, 'CRITICAL sale reconciliation')
+    truthy(crit and crit:find('stage=restore_failed', 1, true))
+    truthy(crit:find('lostValue=450', 1, true), 'the stack value, not the 750 sale total')
+    truthy(crit:find('expectedPayout=750', 1, true), 'with the sale total alongside it')
+    truthy(crit:find('4.5kg/3 star', 1, true), 'and the metadata needed to hand it back')
+    equal(countLines(lines, 'CRITICAL'), 1, 'the two stacks that went back are not reconciliation items')
+end)
+
+test('U4 every line of a compensation cut short shares one saleId and names A', function()
+    local r = compensationIdentityLoss()
+    local saleId = findLine(r.lines, 'sale payout failed'):match('saleId=(%S+)')
+    truthy(saleId)
+
+    local n = 0
+    for _, l in ipairs(r.lines) do
+        if l:find('CRITICAL sale reconciliation', 1, true) then
+            n = n + 1
+            truthy(l:find('saleId=' .. saleId, 1, true),
+                'a CRITICAL line an admin cannot tie back to the sale is useless')
+            truthy(l:find('identity=license:...1234', 1, true), 'booked against A, who is owed')
+            falsy(l:find('9999', 1, true), 'never against B, who was no part of this sale')
+        end
+    end
+    equal(n, 2)
+end)
+
+test('U5 the log closes the books: removed = restored + unreconciled', function()
+    local r = compensationIdentityLoss()
+    local summary = findLine(r.lines, 'sale payout failed')
+    local expected = tonumber(summary:match('expectedPayout=(%d+)'))
+    local restoredValue = tonumber(summary:match('restoredValue=(%d+)'))
+    local unreconciled = tonumber(summary:match('unreconciledValue=(%d+)'))
+    equal(expected, 750)
+    equal(restoredValue + unreconciled, expected,
+        'an admin must be able to close the books without re-pricing anything by hand')
+
+    local sum = 0
+    for _, l in ipairs(r.lines) do
+        if l:find('CRITICAL sale reconciliation', 1, true) then
+            sum = sum + (tonumber(l:match('lostValue=(%d+)')) or 0)
+        end
+    end
+    equal(sum, unreconciled, 'and the per-stack lines have to add up to the aggregate')
+end)
+
 -- ---------------------------------------------------------------- runner
 local failures = 0
 for _, entry in ipairs(tests) do

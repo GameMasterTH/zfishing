@@ -717,8 +717,9 @@ inventory, and only ever to the player it left.** Four rules hold it up.
 4. **A sale belongs to an identity, not to a src.** `sellAll` captures
    `Zfishing.Identifier(src)` into the sale record before the first inventory
    yield and re-checks it at every mutation boundary: before the sweep, **before
-   each removal inside it**, before `AddMoney`, and before compensation. A sale
-   that cannot obtain an identifier is refused before the inventory is read.
+   each removal inside it**, before `AddMoney`, before compensation, and **before
+   each `AddItem` inside compensation**. A sale that cannot obtain an identifier
+   is refused before the inventory is read.
 
    The sale cannot use `Progression.IdentityState` the way the catch path does —
    a player who has never cast has no progression cache, and treating that as
@@ -730,6 +731,24 @@ inventory, and only ever to the player it left.** Four rules hold it up.
    remaining removals strip the *replacement* occupant's fish. It costs one
    identifier lookup per removed stack, on a manual NPC interaction.
 
+   **Compensation is a loop for exactly the same reason, so it is guarded the same
+   way.** A single check before entering `restoreSale` is not sufficient: every
+   `Zfishing.AddItem` inside it crosses the `zcore_lib` boundary and yields, so the
+   window reopens *between stacks*. A src that changes owner after A's first stack
+   is back would have every remaining stack materialise in B's bag. `restoreSale`
+   therefore takes `samePlayer` and re-checks before each `AddItem`; on loss it
+   stops dead — it does not keep restoring, does not retry on the same src, and
+   does not transfer the remainder to the new occupant. What is already back stays
+   back; what is still out becomes a reconciliation item.
+
+   Note the asymmetry with the catch path, which will otherwise read as a bug:
+   there, `gone` (a plain disconnect) is deliberately **silent**, because a player
+   who drops before a mutation simply does not get it and is out nothing. Here, a
+   disconnect after removal means the fish already left the bag — so `gone`
+   mid-compensation is a **CRITICAL** record, exactly like `changed`. The
+   distinguishing question is not "did someone else take the src" but "is the
+   player down something".
+
 A `sell` flood gate (max 2 per 3000ms) sits in front of all of it, so a spammed
 sale costs a table lookup rather than a full inventory sweep.
 
@@ -737,9 +756,36 @@ sale costs a table lookup rather than a full inventory sweep.
 (`<src>-<gametimer>-<seq>`, never sent to the client) so lines about the same sale
 can be tied together in a console where several players are selling at once. A
 failed payout logs one summary — `saleId`, `src`, `expectedPayout`, `removed`,
-`restored`, `restoreFailed` — followed by one `CRITICAL sale reconciliation` line
-per stack that could not be handed back, carrying the item, count, metadata
-summary and expected payout. That is everything needed to make a player whole.
+`restored`, `restoreFailed`, `restoredValue`, `unreconciledValue`, `identityLost`
+— followed by one `CRITICAL sale reconciliation` line per stack that could not be
+handed back, carrying the item, count, metadata summary, `lostValue` and expected
+payout. That is everything needed to make a player whole.
+
+**The accounting, and how to read it.** Every entry in `removed` carries the
+`value` that stack was actually priced at, not just a share of the total, because
+the total is ambiguous the moment part of a sale is recovered — a $1200 sale where
+two of three stacks came back leaves an admin reverse-engineering which slice of
+$1200 is still owed. The figures on the log are:
+
+| Field | Scope | Means |
+|---|---|---|
+| `expectedPayout` | the sale | what everything removed was worth — also the *removed value* |
+| `restoredValue` | the sale | the summed value of the stacks that got back into the player's bag |
+| `unreconciledValue` | the sale | the summed value of everything that left the bag and did not get back |
+| `lostValue` | **one stack** | what that single outstanding stack is worth — the amount owed for it |
+
+and they close:
+
+```
+expectedPayout == restoredValue + unreconciledValue      (payout failed)
+unreconciledValue == Σ lostValue over the CRITICAL lines
+```
+
+If the payout *succeeded* there is no reconciliation at all: the money is the
+other side of the equation and nothing is logged. An identity-aborted sale, where
+nothing was restored, has `restoredValue=0` and `unreconciledValue ==
+expectedPayout`. This is **console accounting, not a ledger** — no DB table
+records any of it (§10).
 There is deliberately **no** per-sale success line: a successful sale already has
 a client-visible receipt, and one line per sale would bury the CRITICAL lines. A
 DB ledger is out of scope; the console record is what an admin reconciles from.
@@ -756,7 +802,12 @@ not theirs. What is already out of A's bag stays out, and the console gets:
 
 one CRITICAL per stack that left the inventory, all sharing the `saleId`.
 `stage` is `removal`, `payout` or `compensation` — where identity was lost — and
-the pre-existing failed-restore path now carries `stage=restore_failed`. This is
+the failed-restore path carries `stage=restore_failed`. A compensation that was
+cut short part-way carries a fourth, `stage=restore_aborted`, for the stacks that
+were deliberately withheld; the two are read differently, and neither is a
+substring of the other. `restore_failed` means the inventory refused the stack and
+the player is still there to hand it to; `restore_aborted` means the src changed
+owner and the player who is owed it is gone, named only by `identity=`. This is
 deliberately manual: the window is a disconnect landing between two specific
 yields of one NPC interaction, and the reconciliation philosophy here has always
 been "one correlated record an admin can act on", not a rollback.
@@ -843,6 +894,35 @@ catch-side guard delegates to. It answers `same` / `gone` / `changed`, and a
 non-string `expected` never matches, so a caller that forgot to capture identity
 fails closed. Each mutation has exactly one guard: two layers would mean deleting
 one still blocks the mutation, and the mutation tests could not fail.
+
+**`IdentityState` cannot protect `Progression.Load`, and that is a different
+boundary — not an oversight.** Every row in the table above compares against
+`cache[src]`, so all of them presuppose the cache exists. `Load` is what *creates*
+it, and its own yields open the same window:
+
+```
+Load(17) captures A → MySQL.single.await yields → A disconnects
+                                                → src=17 goes to player B
+                                                → the load resumes → cache[17] = A
+```
+
+A cache committed under the wrong src is worse than any single stolen fish: it is
+the fact every later comparison trusts, so poisoning it silently disarms the whole
+table. So `Load` compares the **canonical runtime identifier** — `Zfishing.Identifier(src)`,
+never anything client-supplied and never `cache[src]`, which by definition is not
+there yet — captured before the DB work against a fresh read after it, and commits
+only on a match. It returns `true`/`false` accordingly, and a caller that
+dereferences `Progression.Get(src)` straight afterwards has to read that answer
+(`server/session.lua`'s cast and the `zfish_xp` QA command both do; a discarded
+`false` would leave them indexing a nil).
+
+One check, immediately above the assignment — the assignment is the mutation. It
+sits *after* the `json.decode`, so nothing at all separates the guard from the
+commit. A second check between the SELECT and the INSERT is deliberately **not**
+there: it would only avoid leaving an unused `zfishing_players` row for A — which
+is A's own row, and A picks it up on their next load — while making the mutation
+test unable to fail. The invariant is not "no orphan row"; it is **never attach
+that row to the replacement occupant**.
 
 **`sessionId` ≠ player identity, and neither substitutes for the other.**
 `sessionId` is per-cast and makes a *stale or replayed request for this session*
@@ -1210,10 +1290,14 @@ the fishing session captures `identifier` alongside `sessionId`
 `session.lua`'s own post-settlement `reset` / rate-increment guard on
 `sessions[src] == s`. `Progression.IdentityState` is the one comparison the catch
 side uses; the sale side uses `Zfishing.Identifier` because a player who never
-cast has no progression cache. **Adding a new yielding operation that touches
-player state means adding a capture and a re-check** — `sessionId` alone does not
-cover it, because a replayed-session check is still satisfied when the src changed
-owners. Every guard is individually mutation-tested (§10).
+cast has no progression cache — and `Progression.Load` uses `Zfishing.Identifier`
+too, because it is the operation that *builds* the cache the other comparisons
+read. **Adding a new yielding operation that touches player state means adding a
+capture and a re-check** — `sessionId` alone does not cover it, because a
+replayed-session check is still satisfied when the src changed owners, and "one
+check before the loop" does not cover it either when the loop body yields (the
+sale sweep and sale compensation both re-check per iteration). Every guard is
+individually mutation-tested (§10).
 
 **5. Zone distance is 2D in both places and must stay that way.**
 `client/main.lua`'s `currentZone()` and `server/session.lua`'s `resolveZone()` both
@@ -1378,14 +1462,17 @@ caught nothing. Groups N and O in `tests/security.test.lua` are the guard.
   game client, a real inventory resource, or a real database.
   `docs/testing/zfishing-live-e2e-checklist.md` is the manual pass that has to be
   run on a real server before any of this is called production-verified.
-- Suite sizes as of the 2026-08-19 identity-hardening pass: Lua **122 / 5 / 11**
+- Suite sizes as of the 2026-08-20 source-reuse closeout: Lua **133 / 5 / 11**
   (`security`, `water_validation`, `water_validation_preservation`), `web/`
   **18 test files, 71 tests** (~7s, vitest 2.1.9; run it from `web/`, not the
   repo root — the jsdom environment comes from `web/`'s own config). The Lua count
-  rose from 97: groups **Q** (source-id reuse on the catch path, 12 tests),
-  **R** (source-id reuse on the sale path, 8) and **S** (one-warning-per-failure,
-  5). Eight guards were mutation-tested individually — each was removed, the
-  named test confirmed failing, and the guard restored before the next. The web run includes
+  rose from 97 → 122 with groups **Q** (source-id reuse on the catch path, 12
+  tests), **R** (source-id reuse on the sale path, 8) and **S**
+  (one-warning-per-failure, 5), then 122 → 133 with **T** (`Progression.Load`
+  under src reuse, 6) and **U** (identity loss *inside* sale compensation, and
+  per-stack value accounting, 5). Twelve guards have been mutation-tested
+  individually — each was removed, the named test confirmed failing, and the guard
+  restored before the next. The web run includes
   `bundleRebuildPreservation.test.ts`, so the Lua sha256 baseline described in §8
   invariant 7 currently *matches* the files on disk — the guard is live, not
   already broken.
@@ -1415,6 +1502,37 @@ migration.
 ---
 
 ## 12. Change history
+
+### The source-reuse closeout — 2026-08-20
+
+A targeted follow-up to the identity-hardening pass below, closing the two windows
+it left open. Nothing from that pass was changed, weakened or duplicated; both
+fixes sit at boundaries it did not reach.
+
+| Change | Where |
+|---|---|
+| `Progression.Load` captures the canonical identifier before its DB awaits and re-checks it immediately above `cache[src] = …`; returns `true`/`false` | `server/progression.lua` |
+| The two callers that dereference `Progression.Get(src)` straight after a load now read that answer — cast refuses with `no_identity`, `zfish_xp` notifies instead of indexing a nil | `server/session.lua`, `server/progression.lua` |
+| `restoreSale(src, removed, samePlayer)` re-checks identity before **every** compensation `AddItem` and stops dead on loss | `server/rewards.lua` |
+| `restoreSale` returns lists (`restored` / `failed` / `remaining`) and values instead of counts, so the caller can name exactly what is outstanding | `server/rewards.lua` |
+| Each removed stack records its own `value`; reconciliation lines carry `lostValue`, summaries carry `restoredValue` / `unreconciledValue` / `identityLost` | `server/rewards.lua` |
+| New `stage=restore_aborted` for stacks withheld because the src changed owner mid-compensation | `server/rewards.lua` |
+| Groups **T** (6) and **U** (5) in the Lua suite; 122 → 133 | `tests/security.test.lua` |
+| B1 expected `reward=true`; the shipped log says `committed=true`. E7/G13 extended for the value fields | `docs/testing/zfishing-live-e2e-checklist.md` |
+
+**Deliberate non-changes.** No DB transaction around the new-player INSERT: an
+unused `zfishing_players` row for A is A's own row and harmless, and avoiding it
+would cost the single-guard property. No new client-visible reason string —
+identity loss during compensation collapses to the existing `sale_failed`, so
+`locales/` and `web/` are untouched. Still no DB economy ledger.
+
+**Mutation-tested.** Four guards were removed one at a time and the suite confirmed
+red before each was restored: the post-await check in `Load` (T2–T6), the per-item
+`samePlayer()` in compensation (U1, U2, U4), per-stack `value` replaced by the sale
+total (U2, U3, U5), and committing `cache[src]` despite a changed identity
+(T2–T6).
+
+**Live E2E: still NOT VERIFIED.** Nothing in this pass was run inside FiveM.
 
 ### The identity-hardening pass — 2026-08-19
 
