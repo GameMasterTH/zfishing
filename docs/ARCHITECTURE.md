@@ -27,7 +27,7 @@ are server-authoritative; the minigame *outcome* is not — see
 `docs/superpowers/specs/2026-08-18-zfishing-minigame-authority-design.md`.
 
 Version at time of writing: `1.0.0` plus the security-hardening pass of 2026-08-19
-(§12). Roughly 2,900 lines of Lua and 1,500 lines of TypeScript/TSX source.
+(§13). Roughly 2,900 lines of Lua and 1,500 lines of TypeScript/TSX source.
 
 ---
 
@@ -1496,12 +1496,255 @@ migration.
 | Add a water type | `ConfigSchema.WATER_TYPES` and `Config.Admin.waterTypes` |
 | Add a language | copy `locales/en.json` to `locales/<code>.json`, set `Config.Locale` |
 | Change a HUD surface | `web/src/components/`, then `npm run build` in `web/` and commit `web/dist` |
-| Add an admin-editable setting | `SETTING_KEYS` in `store.lua`, `ConfigSchema.Settings`, the `getConfig` payload in `admin.lua`, and a field in `web/src/admin/SettingsTab.tsx` |
+| Add an admin-editable setting | **five** places: a default in `config/main.lua`, `ConfigSchema.Settings`, `SETTING_KEYS` in `store.lua` (gates both `Load` and `ResetDomain`), the explicit `putSetting` block in `Store.Seed()`, and the `getConfig` payload in `admin.lua` — plus a field in `web/src/admin/SettingsTab.tsx`. Miss any one and it fails silently in a different way |
+| Add an encounter | `Encounters.IDS` + `RANDOM_POOL` in `shared/encounters.lua`, a flat `server/encounter_<id>.lua` implementing the module contract (§12.5), its `Encounter.Register` call, and a component under `web/src/encounters/`. `server/session.lua` does not change |
 | Add a new session validation | `server/session.lua` only — and add a matching `error_<reason>` locale key |
 
 ---
 
-## 12. Change history
+## 12. The encounter framework
+
+Fishing is no longer built around one hard-coded fight. A hooked fish becomes a
+**resolved encounter**, chosen server-side and frozen into the session.
+
+```
+                    Fish Roll  (server/generator.lua)
+                       |
+                       v
+                Encounter Resolver  (server/encounter.lua)
+                       |
+        +--------------+--------------+
+        |              |              |
+     DEFAULT         RANDOM         FORCED
+        |              |              |
+        v              v              v
+   fish.encounter   server RNG    admin setting
+        |              |              |
+        +--------------+--------------+
+                       v
+              Session Encounter  (frozen into sessions[src])
+                       |
+        +--------+-----+------+---------+
+        v        v            v         v
+   counter_   fish_       sonar_    legacy_
+    pull    mindgame      strike    tension
+        |        |            |         |
+        +--------+-----+------+---------+
+                       v
+              Catch Settlement  (zfishing:claim -> Rewards.GiveCatch)
+```
+
+**As of this pass only `legacy_tension` is implemented.** The framework, the settings
+and the action contract are live; the three encounter modules are not. Every fish still
+plays the existing tension minigame.
+
+### 12.1 The registry (`shared/encounters.lua`)
+
+Pure data and pure functions, and no native is called at load time so the plain-Lua
+test harness can `dofile` it.
+
+| Member | Meaning |
+|---|---|
+| `IDS` | every valid encounter id, `legacy_tension` included, so a resolved value is always checkable against one set |
+| `FORCEABLE` | what an admin may pick in FORCED mode — the three real encounters. `legacy_tension` is absent on purpose: forcing it would be a fourth selection mode in disguise |
+| `RANDOM_POOL` | a list of `{id, weight}`. Weighted random is a data edit, never a resolver change |
+| `MODES` | `default`, `random`, `forced` |
+| `FALLBACK` | `legacy_tension` |
+| `RECOMMENDED` | behavior -> encounter. **Documentation and admin hint only** — the resolver never reads it |
+| `TierFor` | rolled fish -> difficulty tier 1..5 |
+| `LineMult` | line rating -> line-health multiplier |
+
+Adding an encounter later means an id, a pool entry, and a `server/encounter_<id>.lua`
+module. `server/session.lua` does not change.
+
+### 12.2 The resolver
+
+`Encounter.Resolve(fish)` is the one place a type is chosen. `session.lua`,
+`generator.lua`, the client and the NUI all consume its answer and never re-derive it.
+
+```
+forced  -> Config.ForcedEncounter, or legacy_tension if that value is unusable
+random  -> ZUtil.weightedPick(RANDOM_POOL)
+default -> fish.encounter, or legacy_tension if absent or unregistered
+```
+
+DEFAULT is a **two**-step chain, not the four-step chain (fish -> behavior -> rarity ->
+safe) the original brief proposed. A behavior-based step would move every configured
+fish onto a new encounter the moment the resource restarted, which is a full production
+cutover. `RECOMMENDED` still ships as data so that cutover is a one-line change later.
+
+**Availability is separate from selection.** During the phased rollout the selected
+encounter may have no module deployed, so `session.lua` calls
+`Encounter.ResolveForSession`, which downgrades an unavailable id to `legacy_tension`
+and reports what it downgraded (one console line). Without it, an admin setting FORCED
+to an unbuilt encounter would break fishing for everyone.
+
+### 12.3 Difficulty normalization
+
+`Encounters.TierFor(rarity, weight, wMin, wMax)` maps the five rarities 1:1 onto tiers
+1-5 and adds one tier for a specimen at or above 75% of its species weight range,
+capped at 5. `Generator.Roll` emits it as `difficulty`, beside the existing
+`tensionDiff`.
+
+Equipment is deliberately **not** an input. Tier belongs to the fish, which is what
+makes the invariant testable: the same roll produces the same tier under DEFAULT,
+RANDOM and FORCED. Only the encounter *type* varies with the mode. Gear enters each
+encounter as its own named knob instead — line health via `Encounters.LineMult`,
+stamina drain via the reel, window width via the rod's `greenZone`.
+
+`LineMult` interpolates an explicit curve (10lb 1.00x -> 60lb 1.45x) rather than using
+`rating / 10`. The raw ratings are 10/20/40/60, so the naive formula gives a 6x pool at
+60lb — and at tier 5 the fish escapes on the miss count long before a 480-point line
+breaks, making every upgrade past 20lb invisible.
+
+### 12.4 Session freezing
+
+The **type and tier are resolved at cast**, next to the fish roll. The **challenge
+state is built at hook**, when the fight starts.
+
+```lua
+sessions[src].encounter = {
+    type, mode, difficulty,     -- frozen at cast
+    challengeId, seed, seq,     -- built at hook
+    startedAt, expiresAt, state, outcome, perf,
+}
+```
+
+Nothing re-reads `Config.EncounterMode` after the cast. That is the whole mechanism
+behind the hot-change invariant: an admin may change the mode at any time and a fight
+already in flight is untouched, while the next cast picks up the change.
+
+`challengeId` embeds the session id, so a challenge minted for one fishing session is
+rejected twice over in another — once by `sessionFor`, once by the id comparison.
+
+The expiry backstop is **one `SetTimeout` per encounter**, not a tick loop, and it
+guards on object identity exactly as the bite and hook-timeout timers do. Its delay is
+derived from the module's own worst-case fight estimate, clamped to 15-120s;
+`Config.Timings.reelTimeout` governs `legacy_tension` and nothing else.
+
+### 12.5 The action contract
+
+One callback carries every encounter's input:
+
+```
+zfishing:encounter:act(src, sessionId, challengeId, seq, action)
+```
+
+Rejections, cheapest first:
+
+| check | reason |
+|---|---|
+| flood gate | `too_many_requests` |
+| `sessionFor(src, sessionId)` | `invalid_session` |
+| session is legacy, or no challenge minted | `no_encounter` |
+| challenge id mismatch | `stale_challenge` |
+| outcome already set, or past `expiresAt` | `encounter_over` |
+| action not in the module's set | `bad_action` |
+| `seq ~= enc.seq + 1` | `bad_seq` |
+
+The `seq` comparison is one expression covering every sequencing attack: a duplicate,
+an older value and a fabricated future value are all "not `seq + 1`". A previously
+successful action can never be replayed, because its seq is behind. The reply always
+carries the authoritative `seq` so an honest client that lost a packet resynchronises
+instead of desynchronising.
+
+A structurally invalid action is `bad_action`. An action that is well-formed but *wrong
+for the current state* is not an error — it is a miss, and the module scores it.
+
+**`advance`** is a universal neutral action the NUI sends when its own local deadline
+passes, and it exists because lazy deadline evaluation otherwise has a hole: if the
+player never acts, nothing evaluates the expired window and the fight stalls until
+overall expiry. The server accepts `advance` only once `enc.state.deadline` has
+genuinely passed, then decides for itself what an expired window means. A client cannot
+go faster (an early `advance` is refused) and gains nothing by going slower.
+
+**Flood gate:** `encounter = { max = 40, window = 10000 }` in `session.lua`'s existing
+gate table. Flooding cannot accelerate a catch under any limit — `seq` must strictly
+advance and every unit of progress is computed server-side.
+
+### 12.6 The claim boundary
+
+`zfishing:claim` remains the **single door** to settlement. There is no per-encounter
+claim path. For an encounter session it reads `s.encounter.outcome` and **discards the
+`success` and `reason` arguments the client sent**; the `too_fast` plausibility floor
+applies only to `legacy_tension`, which is still simulated client-side.
+
+Two side effects that used to key off the client's reason now follow the server's
+outcome: `Rig.breakLine` on a snap, and the loss reason returned to the client so the
+player is told what actually happened instead of "the fish got away" for every outcome.
+
+Every encounter terminates in exactly one of `success`, `escape`, `snap`, `timeout`.
+Encounter-internal failures (`bad_seq`, `stale_challenge`) are answered on the action
+callback and never become outcomes.
+
+### 12.7 Performance and XP
+
+Each module reports `value` in 0..1 per action; `Encounter.PerfScore` is their mean, so
+a flawless fight scores 1.0 in every encounter. Under RANDOM the encounter is luck, so
+identical skill must not pay differently.
+
+It reaches settlement as `ctx.perfScore` and is applied at exactly one place — the XP
+grant, capped at +25%. `Rewards.Price`, `qualityMult`, weight, quality and the rare-loot
+roll are untouched: this feature carries no economy delta.
+
+### 12.8 Settings and persistence
+
+`EncounterMode` and `ForcedEncounter` are enum settings bound to the registry. Both are
+server-owned; neither appears in `Store`'s `clientPayload()`, which broadcasts to every
+player.
+
+An invalid stored value is not an error at read time — the resolver degrades to
+`default` / `legacy_tension`. The enum only prevents an invalid value being written.
+
+Hot change needs no new machinery: `Store.SaveSetting` already assigns `Config[key]`,
+persists and broadcasts, and the resolver reads `Config` at cast time only.
+
+`ConfigSchema.ValidateFish` now preserves an `encounter` field. Without that, the first
+admin save of a fish would silently strip whatever encounter it had been assigned —
+`ValidateFish` is a whitelist. `nil` means "never configured"; a present but
+unregistered value is a hard validation error.
+
+### 12.9 Rollback
+
+`legacy_tension` is the DEFAULT fallback and the rollback path. Removing a fish's
+`encounter` field returns it to the existing fight, and an encounter with no deployed
+module downgrades automatically.
+
+---
+
+## 13. Change history
+
+### The encounter framework (Phase A) — 2026-08-20
+
+Replaced "the minigame" with a resolved encounter, without changing which fight any
+player actually gets. Full detail in §12; what shipped and what deliberately did not:
+
+**Shipped.** `shared/encounters.lua` (registry, `TierFor`, `LineMult`);
+`server/encounter.lua` (resolver, module registry, challenge lifecycle, the
+`zfishing:encounter:act` callback, `PerfScore`); `EncounterMode` and `ForcedEncounter`
+as validated DB-backed settings, readable by the admin panel along with the registry
+itself; `difficulty` on the fish roll; the encounter frozen into the session at cast;
+an encounter-aware claim that discards the client's `success` flag; `ctx.perfScore` on
+the XP grant only.
+
+**Not shipped.** None of `counter_pull`, `fish_mindgame` or `sonar_strike` exists yet,
+and no NUI changed. Every fish resolves to `legacy_tension` because no fish carries an
+`encounter` field, and `Encounter.Playable` downgrades any selection whose module is
+not deployed — so an admin can set FORCED to an unbuilt encounter without breaking
+fishing.
+
+**Three deliberate deviations from the design brief**, each recorded with its reason in
+`docs/superpowers/specs/2026-08-20-zfishing-encounter-system-design.md`: DEFAULT falls
+back to `legacy_tension` rather than to a behavior-based default (§12.2); encounter
+performance raises XP only, never quality or price (§12.7); and `Encounter.Playable`
+separates availability from selection, which the brief did not anticipate.
+
+**Test-suite changes worth knowing.** `tests/harness.lua` is a new shared scaffold for
+the encounter suites — `tests/security.test.lua` keeps its own copy on purpose, and was
+touched only to declare the encounter modules its loaders now depend on.
+`tests/luarun.mjs` also mounts `tests/*.lua` so a suite can `dofile` the harness.
+`tests/package.json` gained a script per suite plus `test:all`; before this,
+`security.test.lua` had no script at all.
 
 ### The source-reuse closeout — 2026-08-20
 

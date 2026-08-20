@@ -238,6 +238,13 @@ function Encounter.Resolve(fish)
 end
 ```
 
+**Availability is separate from selection.** `Encounter.Resolve` is pure policy.
+During the phased rollout the selected encounter may have no module deployed yet, so
+`server/session.lua` calls `Encounter.ResolveForSession`, which downgrades an
+unavailable id to `legacy_tension` and reports what it downgraded. Each phase registers
+its module and the downgrade stops applying to that id. Without this, an admin setting
+FORCED to an unbuilt encounter after Phase A would break fishing for everyone.
+
 Debug logging (behind the existing debug/print conventions, one line per cast, not
 per action):
 

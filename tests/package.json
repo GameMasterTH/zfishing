@@ -5,7 +5,15 @@
   "description": "Node + wasmoon runner for the plain-Lua spec tests (no native Lua interpreter is available on this machine).",
   "scripts": {
     "test:water": "node luarun.mjs tests/water_validation.test.lua",
-    "test:water-preservation": "node luarun.mjs tests/water_validation_preservation.test.lua"
+    "test:water-preservation": "node luarun.mjs tests/water_validation_preservation.test.lua",
+    "test:security": "node luarun.mjs tests/security.test.lua",
+    "test:encounter-resolver": "node luarun.mjs tests/encounter_resolver.test.lua",
+    "test:encounter-admin": "node luarun.mjs tests/encounter_admin.test.lua",
+    "test:encounter-difficulty": "node luarun.mjs tests/encounter_difficulty.test.lua",
+    "test:encounter-session": "node luarun.mjs tests/encounter_session.test.lua",
+    "test:encounter-action": "node luarun.mjs tests/encounter_action.test.lua",
+    "test:encounter-claim": "node luarun.mjs tests/encounter_claim.test.lua",
+    "test:all": "npm run test:water && npm run test:water-preservation && npm run test:security && npm run test:encounter-resolver && npm run test:encounter-admin && npm run test:encounter-difficulty && npm run test:encounter-session && npm run test:encounter-action && npm run test:encounter-claim"
   },
   "devDependencies": {
     "wasmoon": "^1.16.0"
