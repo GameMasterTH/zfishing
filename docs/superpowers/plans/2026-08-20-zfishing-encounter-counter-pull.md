@@ -2,26 +2,44 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship `counter_pull` — the first real encounter — end to end: a server-owned state machine, a client bridge, a NUI that reads as part of the world rather than a wall of text, and the tests that hold all three honest.
+**Goal:** Ship `counter_pull` — the first real encounter — end to end: a server-owned state machine, a client bridge that orchestrates the fight, a NUI panel that presents it, and the tests that hold all three honest.
 
-**Architecture:** `server/encounter_counter_pull.lua` implements the module contract Phase A defined and registers itself. The server owns the fish's direction, the counter window, stamina, line health and the phase clock; the client sends one discrete action per counter and renders whatever authoritative state comes back. `client/encounter.lua` is a bridge with an input-polling thread and nothing else — no simulation. Rendering animates inside `requestAnimationFrame`; React state changes only on a phase transition.
+**Architecture:** `server/encounter_counter_pull.lua` implements the module contract Phase A defined and registers itself. The server owns the fish's direction, the counter window, stamina, line health and the phase clock, and it is the only place absolute time exists — every render payload leaves the server as **relative durations**. `client/encounter.lua` orchestrates: it routes the bite, polls input, serializes one action at a time, and drives settlement. The NUI presents and nothing else.
 
 **Tech Stack:** Lua 5.4 (FiveM `cerulean`), ox_lib callbacks, wasmoon test harness, React 18 + Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-08-20-zfishing-encounter-system-design.md` (sections 4 and 12 of `docs/ARCHITECTURE.md`)
+**Spec:** `docs/superpowers/specs/2026-08-20-zfishing-encounter-system-design.md`, plus `docs/ARCHITECTURE.md` §12.
 
-**Prerequisite:** Phase A, merged to `main` at `245fabd`. 198 Lua tests and 71 web tests pass on that tree.
+**Prerequisite — verify before starting:** Phase A must be present on the working tree.
+
+```bash
+grep -c "Encounter.Register" server/encounter.lua && grep -c "Encounters.FALLBACK" server/session.lua
+```
+
+Both must be non-zero. Phase A merged to `main` at `245fabd`; this plan's branch is `encounter-counter-pull`, cut from that merge, where 198 Lua tests and 71 web tests pass. **Do not implement Phase B on a tree without the Phase A encounter contract.**
 
 ## Global Constraints
 
-- **The module contract is fixed by Phase A** and is quoted verbatim in Task 1. Do not redesign it.
-- **The server owns every fight decision.** The action payload never carries a timing value the server trusts, and no render payload ever contains `required`.
+- **The module contract is fixed by Phase A.** Task 1 makes additive refinements to it and nothing else. Do not redesign it.
+- **Absolute time never leaves the server.** `M.render` emits durations relative to the server's own `now`. Internal state (`windowOpensAt`, `deadline`, …) stays absolute — that is what the server compares an incoming action against. Server `GetGameTimer()` and client `GetGameTimer()` are unrelated clock domains; subtracting one from the other, in either direction and on either side, produces a number that means nothing.
+- **Every authoritative transition carries a `phaseId`.** Phase name plus timings can repeat exactly; an id cannot. React re-anchors on it.
+- **The server owns every fight decision.** No action payload carries a timing value the server trusts, and no render payload contains `required`.
+- **Responsibility boundary:** server = gameplay authority; client = orchestration, including settlement; NUI = presentation.
 - **Lua files stay flat** in `client/`, `server/`, `shared/`, `tests/` — `tests/luarun.mjs` mounts those non-recursively.
-- **`legacy_tension` stays untouched.** `client/minigame.lua` keeps its existing bite/reel path; the new bridge runs only when `data.encounter ~= 'legacy_tension'`.
+- **`legacy_tension` stays untouched.** `client/minigame.lua` keeps its existing bite/reel path; the bridge runs only when the bite payload names a non-legacy encounter.
 - **No per-frame traffic.** No Lua→NUI message per frame, no client→server event per frame, no React state update per frame.
-- **Every cue carries more than colour** — direction, icon shape, motion and text.
+- **Every cue carries more than colour** — direction, glyph shape, motion and text.
+- **No probabilistic assertions.** Behaviour tests pin the seed and compare deterministic outputs.
 - **Baseline to preserve:** `cd tests && npm run test:all` reports 9 suites totalling 198 tests; `npm --prefix web test` reports 71. Both must still pass at the end of every task.
 - Stable ids verbatim: encounter `counter_pull`; actions `left`, `right`, `brace`, `reel`, plus the universal `advance`; phases `LEFT_RUN`, `RIGHT_RUN`, `DIVE`, `FATIGUED`, `LANDING`.
+
+---
+
+## Deferred, explicitly
+
+**Directional world feedback — rod lean, bobber displacement and splash driven by the authoritative phase — is NOT part of Phase B.** The spec describes it (§4.7) and it is the difference between a fight that reads as part of the world and a panel that reads as a menu, but it needs work in `client/casting.lua` and the anim layer that has nothing to do with the state machine, and half of it shipped is worse than none.
+
+Phase B delivers directional glyphs, motion, text, keycaps and the existing fight sound and animation. Phase G picks up world feedback as a visual-only layer: no world visual may ever influence gameplay authority.
 
 ---
 
@@ -29,263 +47,52 @@
 
 | File | Responsibility | Task |
 | --- | --- | --- |
-| `server/encounter_counter_pull.lua` | **Create.** Tier table, phase machine, action scoring, render payload. Registers itself. | 1 |
-| `server/encounter.lua` | **Modify.** Two contract refinements: `ctx.now` for `build`, and `Begin` returning the initial render payload. | 1 |
-| `server/session.lua` | **Modify.** `zfishing:hook` returns the initial encounter render alongside the challenge id. | 1 |
-| `tests/encounter_counter_pull.test.lua` | **Create.** The PART 26 list, minus what the contract suite already covers. | 1 |
-| `client/encounter.lua` | **Create.** Bite routing, input polling, action dispatch, teardown. Bridge only. | 2 |
-| `client/minigame.lua` | **Modify.** Bail out of the legacy path when the session is an encounter. | 2 |
-| `web/src/encounters/types.ts` | **Create.** Shared payload types. | 3 |
-| `web/src/encounters/EncounterHost.tsx` | **Create.** Shared shell, dispatch by encounter type. | 3 |
-| `web/src/encounters/CounterPull.tsx` | **Create.** The directional fight UI. | 3 |
-| `web/src/App.tsx` | **Modify.** Route the `encounter` view. | 3 |
-| `web/src/style.css` | **Modify.** Encounter classes, reusing the existing HUD language. | 3 |
-| `web/src/encounters/__tests__/CounterPull.test.tsx` | **Create.** State-transition coverage. | 4 |
-| `locales/en.json`, `locales/th.json` | **Modify.** Encounter UI strings. | 4 |
-| `fxmanifest.lua` | **Modify.** Load the module and the bridge. | 5 |
-| `web/dist` | **Rebuild and commit.** Without it the running resource has no encounter UI. | 5 |
-| `docs/ARCHITECTURE.md` | **Modify.** Counter-pull subsection and a change-history entry. | 5 |
+| `server/encounter.lua` | **Modify.** Contract refinements: `ctx.now` into `build`, `mod.render(enc, now)`, `Begin` returns the opening render. | 1 |
+| `server/session.lua` | **Modify.** `zfishing:hook` returns the opening render with the challenge id. | 1 |
+| `tests/harness.lua` | **Modify.** `H.withSeed` so a fight's RNG stream is pinnable. | 1 |
+| `server/encounter_counter_pull.lua` | **Create.** Tier table, phase machine with `phaseId` and `countersSinceFatigue`, action scoring, relative render. | 2 |
+| `tests/encounter_counter_pull.test.lua` | **Create.** The fight itself, deterministic throughout. | 2 |
+| `client/encounter.lua` | **Create.** Bite routing, serialized action dispatch, settlement orchestration, teardown. | 3 |
+| `client/minigame.lua` | **Modify.** Bail out of the legacy path when the session is an encounter. | 3 |
+| `tests/client_encounter.test.lua` | **Create.** Bridge lifecycle coverage. | 3 |
+| `web/src/encounters/types.ts` | **Create.** Payload types — durations, not timestamps. | 4 |
+| `web/src/encounters/EncounterHost.tsx` | **Create.** Shared shell, dispatch by encounter type. | 4 |
+| `web/src/encounters/CounterPull.tsx` | **Create.** The directional fight UI. | 4 |
+| `web/src/App.tsx` | **Modify.** Route the `encounter` view. | 4 |
+| `web/src/style.css` | **Modify.** Encounter classes in the existing HUD language. | 4 |
+| `web/src/encounters/__tests__/CounterPull.test.tsx` | **Create.** State-transition coverage. | 5 |
+| `locales/en.json`, `locales/th.json` | **Modify.** Encounter UI strings. | 5 |
+| `fxmanifest.lua`, `web/dist`, `docs/*` | **Modify / rebuild.** | 6 |
 
 ---
 
-## Task 1: The counter-pull module
+## Task 1: Contract corrections
+
+Three additive changes to the Phase A contract, isolated in their own task because they touch shipped, merged code and deserve their own review gate. No encounter behaviour changes here.
 
 **Files:**
-- Create: `server/encounter_counter_pull.lua`
-- Modify: `server/encounter.lua` (the `Encounter.Begin` body)
+- Modify: `server/encounter.lua` (`Encounter.Begin`)
 - Modify: `server/session.lua` (the `zfishing:hook` tail)
-- Create: `tests/encounter_counter_pull.test.lua`
-- Modify: `tests/package.json`
+- Modify: `tests/harness.lua`
 
 **Interfaces:**
-- Consumes, verbatim from Phase A (`server/encounter.lua`):
-  - `Encounter.Register(id, mod)` — errors on an id outside `Encounters.IDS`.
-  - `mod.actions` — set of valid action names. `advance` is handled by the dispatcher and must NOT appear here.
-  - `mod.build(ctx) -> state, estimatedFightMs` where `ctx = { difficulty, seed, fish, gear, now }`. `gear = { lineRating, reelDrain, greenZone }`.
-  - `mod.act(enc, action, now) -> { render, outcome, value }`. The module writes `enc.state.deadline`; the dispatcher reads it to validate `advance`. `outcome` must be `nil` or one of `success` / `escape` / `snap` / `timeout`. `value` is 0..1 and feeds `Encounter.PerfScore`.
-  - `Encounters.LineMult(rating)`, `Encounters.TierFor`, `ZUtil.clamp`.
-- Produces: `mod.render(enc) -> table`, called by `Encounter.Begin` for the opening frame and by `act` for every later one. `zfishing:hook` answers `{ ok = true, challengeId = <string>, encounter = <render> }`.
+- Produces, for Task 2 onward:
+  - `mod.build(ctx) -> state, estimatedFightMs` where `ctx = { difficulty, seed, fish, gear, now }`.
+  - `mod.render(enc, now) -> table` — **relative durations only**, plus `phaseId`.
+  - `Encounter.Begin(s, gear) -> challengeId, openingRender`.
+  - `zfishing:hook` answers `{ ok = true, challengeId = <string>, encounter = <render> }`.
+  - `H.withSeed(seed, fn)` — pins `math.random(a, b)` so a challenge seed is reproducible.
 
-- [ ] **Step 1: Write the failing module tests**
+- [ ] **Step 1: Give `build` the clock and `Begin` an opening frame**
 
-Create `tests/encounter_counter_pull.test.lua`:
-
-```lua
--- Counter-Pull Fight. Run from the resource root:
---   node tests/luarun.mjs tests/encounter_counter_pull.test.lua
---
--- Sequencing, replay, stale challenge, wrong session and disconnect are covered once
--- for every encounter in tests/encounter_action.test.lua -- this suite is about the
--- fight itself, plus the two places where a rejected action must leave the phase alone.
-
-dofile('tests/harness.lua')
-local test, equal, truthy, falsy = H.test, H.equal, H.truthy, H.falsy
-
-local FISH = { species = 'pike', label = 'Pike', weight = 6.0, quality = 3, rarity = 'uncommon',
-    behavior = 'erratic', biteDelay = 100, hookWindow = 1500, tensionDiff = 1.15,
-    fishEnergy = 50, xp = 24, price = 18, difficulty = 2 }
-
--- cast -> bite -> hook, leaving an armed counter-pull challenge.
-local function start(opts)
-    opts = opts or {}
-    local fish = H.deepcopy(FISH)
-    if opts.difficulty then fish.difficulty = opts.difficulty end
-    if opts.behavior then fish.behavior = opts.behavior end
-    local calls = H.loadSession({ fish = fish, encounterMode = 'forced',
-                                  forcedEncounter = 'counter_pull', rig = opts.rig })
-    dofile('server/encounter_counter_pull.lua')
-    local cast = H.CB['zfishing:cast'](5, 0.5, opts.rig and 1 or nil)
-    truthy(cast.ok, tostring(cast.reason))
-    H.fireLatestTimer()
-    local hook = H.CB['zfishing:hook'](5, cast.sessionId)
-    truthy(hook.ok)
-    truthy(hook.challengeId)
-    return { sid = cast.sessionId, cid = hook.challengeId, open = hook.encounter, calls = calls }
-end
-
-local COUNTER = { LEFT_RUN = 'right', RIGHT_RUN = 'left', DIVE = 'brace' }
-
--- Plays the correct answer for whatever the server just told us, at a moment inside
--- the counter window. Returns the server's reply.
-local function answerCorrectly(g, seq, render)
-    local r = render or g.last
-    _G.__NOW = r.windowOpensAt + 50
-    local action = r.phase == 'FATIGUED' and 'reel'
-        or r.phase == 'LANDING' and 'reel'
-        or COUNTER[r.phase]
-    local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, seq, action)
-    g.last = res.state or r
-    return res
-end
-
-test('P1 the hook answer opens the fight with a renderable phase', function()
-    local g = start()
-    truthy(g.open, 'the client has to be given something to draw before the first action')
-    truthy(COUNTER[g.open.phase], 'the opening phase is one of the three run states')
-    truthy(g.open.windowOpensAt > g.open.telegraphAt, 'the telegraph precedes the window')
-    equal(g.open.required, nil, 'the render payload must never carry the answer')
-    truthy(g.open.staminaPct); truthy(g.open.linePct)
-end)
-
-test('P2 a correct counter drains stamina and arms the next phase', function()
-    local g = start()
-    g.last = g.open
-    local before = g.open.staminaPct
-    local res = answerCorrectly(g, 1)
-    truthy(res.ok)
-    equal(res.outcome, nil)
-    truthy(res.state.staminaPct < before, 'a correct counter must cost the fish stamina')
-    equal(res.state.linePct, g.open.linePct, 'and must not damage the line')
-    equal(res.state.misses, 0)
-end)
-
-test('P3 a wrong counter damages the line and counts a miss', function()
-    local g = start()
-    local wrong = g.open.phase == 'DIVE' and 'left' or 'brace'
-    _G.__NOW = g.open.windowOpensAt + 50
-    local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, wrong)
-    truthy(res.ok, 'a wrong answer is a legal action, not a protocol error')
-    equal(res.state.misses, 1)
-    truthy(res.state.linePct < g.open.linePct)
-end)
-
-test('P4 the right key at the wrong moment is still a miss', function()
-    local g = start()
-    local right = COUNTER[g.open.phase]
-    _G.__NOW = g.open.telegraphAt          -- window has not opened yet
-    local early = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, right)
-    equal(early.state.misses, 1, 'countering before the fish commits is a miss')
-
-    local g2 = start()
-    local right2 = COUNTER[g2.open.phase]
-    _G.__NOW = g2.open.windowClosesAt + 5000
-    local late = H.CB['zfishing:encounter:act'](5, g2.sid, g2.cid, 1, right2)
-    equal(late.state.misses, 1, 'countering after the window is a miss')
-end)
-
-test('P5 reeling during a run is a miss; reeling during fatigue is the point', function()
-    local g = start()
-    _G.__NOW = g.open.windowOpensAt + 50
-    equal(H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, 'reel').state.misses, 1,
-        'you cannot reel a fish that is running')
-
-    -- drive correct counters until the fish tires
-    local g2 = start()
-    g2.last = g2.open
-    local seq, fatigued = 1, nil
-    while seq <= 12 and not fatigued do
-        local res = answerCorrectly(g2, seq)
-        seq = seq + 1
-        if res.state and res.state.phase == 'FATIGUED' then fatigued = res.state end
-    end
-    truthy(fatigued, 'enough correct counters must tire the fish out')
-    truthy(fatigued.reelsLeft and fatigued.reelsLeft > 0)
-    local before = fatigued.staminaPct
-    _G.__NOW = fatigued.windowOpensAt + 50
-    local r = H.CB['zfishing:encounter:act'](5, g2.sid, g2.cid, seq, 'reel')
-    truthy(r.ok)
-    truthy(r.state.staminaPct < before, 'reeling a fatigued fish takes a bigger bite of its stamina')
-end)
-
-test('P6 advance after the window expires is scored as a miss by the SERVER', function()
-    local g = start()
-    _G.__NOW = g.open.windowClosesAt + 1000
-    local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, 'advance')
-    truthy(res.ok)
-    equal(res.state.misses, 1)
-    truthy(res.state.phase, 'the fight moves on rather than stalling')
-end)
-
-test('P7 line damage ends the fight as a snap', function()
-    local g = start({ difficulty = 5 })
-    local seq, outcome = 1, nil
-    while seq <= 40 and not outcome do
-        _G.__NOW = _G.__NOW + 60000        -- never answer; every window expires
-        local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, seq, 'advance')
-        outcome = res.outcome
-        seq = seq + 1
-        if not res.ok and res.reason == 'encounter_over' then outcome = res.outcome end
-    end
-    truthy(outcome == 'snap' or outcome == 'escape' or outcome == 'timeout',
-        'a fight nobody plays must end in a normalized failure, got ' .. tostring(outcome))
-end)
-
-test('P8 a clean fight lands the fish and scores a perfect performance', function()
-    local g = start({ difficulty = 1 })
-    g.last = g.open
-    local seq, outcome = 1, nil
-    while seq <= 60 and not outcome do
-        local res = answerCorrectly(g, seq)
-        outcome = res.outcome
-        seq = seq + 1
-    end
-    equal(outcome, 'success', 'answering every phase correctly must land the fish')
-    truthy(H.CB['zfishing:claim'](5, g.sid, 0, false, nil).fish, 'and the claim pays')
-    equal(g.calls.ctx.perfScore, 1, 'no miss means a perfect score')
-end)
-
-test('P9 a rejected action leaves the phase and the clock untouched', function()
-    local g = start()
-    local before = H.deepcopy(g.open)
-    equal(H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 9, 'left').reason, 'bad_seq')
-    equal(H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, 'teleport').reason, 'bad_action')
-    _G.__NOW = before.windowOpensAt + 50
-    local ok = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, COUNTER[before.phase])
-    truthy(ok.ok, 'seq 1 was never consumed')
-    equal(ok.state.misses, 0, 'and neither rejection was scored')
-end)
-
-test('P10 tier drives the difficulty knobs in the right direction', function()
-    local easy = start({ difficulty = 1 }).open
-    local hard = start({ difficulty = 5 }).open
-    truthy(hard.windowClosesAt - hard.windowOpensAt < easy.windowClosesAt - easy.windowOpensAt,
-        'a harder fish gives a shorter counter window')
-    truthy(hard.telegraphAt + (hard.windowOpensAt - hard.telegraphAt)
-           < easy.telegraphAt + (easy.windowOpensAt - easy.telegraphAt) + 1,
-        'and a shorter telegraph')
-    equal(hard.maxMisses <= easy.maxMisses, true)
-end)
-
-test('P11 behavior shapes which phases the fish picks', function()
-    -- steady_heavy dives far more than it runs; over many phases that has to show.
-    local dives, runs = 0, 0
-    for i = 1, 30 do
-        local g = start({ behavior = 'steady_heavy', difficulty = 1 })
-        if g.open.phase == 'DIVE' then dives = dives + 1 else runs = runs + 1 end
-    end
-    truthy(dives > runs, 'a heavy fish must favour DIVE, got ' .. dives .. ' dives / ' .. runs .. ' runs')
-end)
-
-test('P12 better gear widens the window and deepens the line, without touching the tier', function()
-    local plain = start({ difficulty = 3 }).open
-    local geared = start({ difficulty = 3, rig = true }).open
-    equal(plain.maxMisses, geared.maxMisses, 'gear must not change the tier')
-    truthy(geared.windowClosesAt - geared.windowOpensAt >= plain.windowClosesAt - plain.windowOpensAt)
-end)
-
-H.run()
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-```bash
-node tests/luarun.mjs tests/encounter_counter_pull.test.lua
-```
-
-Expected: `RUNNER ERROR` naming `server/encounter_counter_pull.lua` — the file does not exist.
-
-- [ ] **Step 3: Give `build` the clock and let `Begin` return the opening frame**
-
-Two small contract refinements. `mod.build` needs `now` to arm its first phase, and the client needs something to draw before its first action.
-
-In `server/encounter.lua`, inside `Encounter.Begin`, move the clock read above the build call and pass it in:
+In `server/encounter.lua`, `Encounter.Begin` currently reads the clock after building. Move the read above, pass it in:
 
 ```lua
 function Encounter.Begin(s, gear)
     local mod = Encounter.MODULES[s.encounter.type]
     if not mod then return nil end
 
-    -- `now` is read before build so a module can arm its first phase against the same
+    -- `now` is read before build so a module arms its first phase against the same
     -- clock the expiry timer below is set from.
     local now = GetGameTimer()
     local state, estimate = mod.build({
@@ -297,14 +104,21 @@ function Encounter.Begin(s, gear)
     })
 ```
 
-and delete the later `local now = GetGameTimer()` line. Then change the return:
+Delete the later `local now = GetGameTimer()` line, and change the return:
 
 ```lua
     -- The opening frame. Without it the NUI has nothing to draw until the player's
-    -- first action, which is the one moment they cannot act without seeing something.
-    return s.encounter.challengeId, mod.render and mod.render(s.encounter) or nil
+    -- first action -- the one moment they cannot act without seeing something.
+    --
+    -- render() takes `now` because every duration it emits is relative to it. Absolute
+    -- server timestamps must never reach a client: the server's GetGameTimer() and the
+    -- client's are unrelated clocks with unrelated origins, and arithmetic between them
+    -- is meaningless no matter which side performs it.
+    return s.encounter.challengeId, mod.render and mod.render(s.encounter, now) or nil
 end
 ```
+
+- [ ] **Step 2: Return the opening frame from the hook**
 
 In `server/session.lua`, the `zfishing:hook` tail becomes:
 
@@ -320,7 +134,311 @@ In `server/session.lua`, the `zfishing:hook` tail becomes:
     return { ok = true, challengeId = challengeId, encounter = opening }
 ```
 
-- [ ] **Step 4: Write the module**
+- [ ] **Step 3: Add a seed pin to the harness**
+
+Append to `tests/harness.lua`, immediately before `function H.run()`:
+
+```lua
+-- Pins math.random(a, b) -- the form Encounter.Begin uses to mint a challenge seed --
+-- so a fight's whole RNG stream is reproducible. Without it a behaviour test can only
+-- assert a distribution, and a distribution assertion is a flaky test wearing a
+-- statistics costume.
+function H.withSeed(seed, fn)
+    local real = math.random
+    math.random = function(a, b)
+        if a == nil then return real() end
+        if b == nil then return math.min(seed, a) end
+        return math.max(a, math.min(b, seed))
+    end
+    local ok, err = pcall(fn)
+    math.random = real
+    if not ok then error(err, 0) end
+end
+```
+
+- [ ] **Step 4: Verify the contract change broke nothing**
+
+```bash
+cd tests && npm run test:all
+```
+
+Expected: 9 suites, 198 tests, exit 0. No module implements `render` yet, so `Begin` returns `nil` for it and `hook` answers `encounter = nil` — the fake modules in `tests/encounter_action.test.lua` define no `render`, which is exactly the path the `mod.render and` guard covers.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/encounter.lua server/session.lua tests/harness.lua
+git commit -m "feat: emit encounter render payloads as relative durations"
+```
+
+---
+
+## Task 2: The counter-pull module
+
+**Files:**
+- Create: `server/encounter_counter_pull.lua`
+- Create: `tests/encounter_counter_pull.test.lua`
+- Modify: `tests/package.json`
+
+**Interfaces:**
+- Consumes: `Encounter.Register(id, mod)`; `ctx = { difficulty, seed, fish, gear, now }`; `Encounters.LineMult(rating)`; `ZUtil.clamp`.
+- Produces: `mod.actions`, `mod.build`, `mod.render(enc, now)`, `mod.act(enc, action, now)`.
+  `act` returns `{ render, outcome, value }`; the module writes `enc.state.deadline` in **absolute** server time for the dispatcher's `advance` check.
+
+**Performance contract.** Phase A's `Encounter.PerfScore` is `sum(value) / count(value)` over every action that reached the module, so for counter-pull:
+
+| event | counted? | value |
+| --- | --- | --- |
+| correct counter / brace / fatigue reel / landing reel | yes | 1 |
+| wrong key, or the right key outside the window | yes | 0 |
+| `advance` after a missed deadline | yes | 0 — a missed window is a gameplay miss |
+| `bad_seq`, `bad_action`, `stale_challenge`, `too_many_requests` | **no** — rejected before the module runs | — |
+
+A flawless fight is therefore exactly `1.0`, and a protocol error never dents a player's score.
+
+- [ ] **Step 1: Write the failing module tests**
+
+Create `tests/encounter_counter_pull.test.lua`:
+
+```lua
+-- Counter-Pull Fight. Run from the resource root:
+--   node tests/luarun.mjs tests/encounter_counter_pull.test.lua
+--
+-- Sequencing, replay, stale challenge, wrong session and disconnect are covered once
+-- for every encounter in tests/encounter_action.test.lua. This suite is about the
+-- fight itself.
+--
+-- Every test here is deterministic. Render payloads carry DURATIONS, so a test tracks
+-- absolute time itself: it knows the clock an action was sent at, and the reply says
+-- how far from that instant each edge is.
+
+dofile('tests/harness.lua')
+local test, equal, truthy, falsy = H.test, H.equal, H.truthy, H.falsy
+
+local FISH = { species = 'pike', label = 'Pike', weight = 6.0, quality = 3, rarity = 'uncommon',
+    behavior = 'erratic', biteDelay = 100, hookWindow = 1500, tensionDiff = 1.15,
+    fishEnergy = 50, xp = 24, price = 18, difficulty = 2 }
+
+local COUNTER = { LEFT_RUN = 'right', RIGHT_RUN = 'left', DIVE = 'brace' }
+
+-- cast -> bite -> hook, leaving an armed counter-pull challenge. `g.at` is the clock
+-- the current render was built against; every duration in `g.last` measures from it.
+local function start(opts)
+    opts = opts or {}
+    local fish = H.deepcopy(FISH)
+    if opts.difficulty then fish.difficulty = opts.difficulty end
+    if opts.behavior then fish.behavior = opts.behavior end
+
+    local g = {}
+    local run = function()
+        g.calls = H.loadSession({ fish = fish, encounterMode = 'forced',
+                                  forcedEncounter = 'counter_pull', rig = opts.rig })
+        dofile('server/encounter_counter_pull.lua')
+        local cast = H.CB['zfishing:cast'](5, 0.5, opts.rig and 1 or nil)
+        truthy(cast.ok, tostring(cast.reason))
+        H.fireLatestTimer()
+        local hook = H.CB['zfishing:hook'](5, cast.sessionId)
+        truthy(hook.ok); truthy(hook.challengeId); truthy(hook.encounter)
+        g.sid, g.cid, g.last, g.at, g.seq = cast.sessionId, hook.challengeId, hook.encounter, _G.__NOW, 0
+    end
+    if opts.seed then H.withSeed(opts.seed, run) else run() end
+    return g
+end
+
+-- Sends `action` at `offset` ms past the moment the current render was built.
+local function act(g, action, offset)
+    _G.__NOW = g.at + offset
+    g.seq = g.seq + 1
+    local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, g.seq, action)
+    if res.ok and res.state then g.last, g.at = res.state, _G.__NOW end
+    return res
+end
+
+local function correctFor(render)
+    if render.phase == 'FATIGUED' or render.phase == 'LANDING' then return 'reel' end
+    return COUNTER[render.phase]
+end
+
+-- Answers whatever the server just asked for, just inside the window.
+local function answer(g)
+    return act(g, correctFor(g.last), g.last.windowOpensIn + 50)
+end
+
+test('P1 the hook answer opens the fight with a renderable phase', function()
+    local g = start()
+    truthy(COUNTER[g.last.phase], 'the opening phase is one of the three run states')
+    equal(g.last.required, nil, 'the render payload must never carry the answer')
+    truthy(g.last.phaseId, 'every authoritative transition is identifiable')
+    truthy(g.last.windowOpensIn > g.last.telegraphIn, 'the telegraph precedes the window')
+    truthy(g.last.windowClosesIn > g.last.windowOpensIn)
+    equal(g.last.windowOpensAt, nil, 'absolute server time must never reach a client')
+    equal(g.last.staminaPct, 100); equal(g.last.linePct, 100)
+end)
+
+test('P2 a correct counter drains stamina and arms a NEW phase', function()
+    local g = start()
+    local firstId = g.last.phaseId
+    local res = answer(g)
+    truthy(res.ok); equal(res.outcome, nil)
+    truthy(res.state.staminaPct < 100, 'a correct counter must cost the fish stamina')
+    equal(res.state.linePct, 100, 'and must not damage the line')
+    equal(res.state.misses, 0)
+    truthy(res.state.phaseId > firstId, 'the phase id must advance even when the phase repeats')
+end)
+
+test('P3 a wrong counter damages the line and counts a miss', function()
+    local g = start()
+    local wrong = g.last.phase == 'DIVE' and 'left' or 'brace'
+    local res = act(g, wrong, g.last.windowOpensIn + 50)
+    truthy(res.ok, 'a wrong answer is a legal action, not a protocol error')
+    equal(res.state.misses, 1)
+    truthy(res.state.linePct < 100)
+end)
+
+test('P4 the right key at the wrong moment is still a miss', function()
+    local g = start()
+    equal(act(g, correctFor(g.last), 0).state.misses, 1,
+        'countering before the fish commits is a miss')
+
+    local g2 = start()
+    equal(act(g2, correctFor(g2.last), g2.last.windowClosesIn + 2000).state.misses, 1,
+        'countering after the window is a miss')
+end)
+
+test('P5 reeling during a run is a miss; reeling during fatigue is the point', function()
+    local g = start()
+    equal(act(g, 'reel', g.last.windowOpensIn + 50).state.misses, 1,
+        'you cannot reel a fish that is running')
+
+    local g2 = start({ difficulty = 1 })
+    local fatigued
+    for _ = 1, 12 do
+        if g2.last.phase == 'FATIGUED' then fatigued = g2.last break end
+        answer(g2)
+    end
+    truthy(fatigued, 'enough correct counters must tire the fish out')
+    truthy((fatigued.reelsLeft or 0) > 0)
+    local before = fatigued.staminaPct
+    local r = answer(g2)
+    truthy(r.ok)
+    truthy(r.state.staminaPct < before, 'reeling a fatigued fish takes a bigger bite')
+end)
+
+test('P6 advance after the window expires is scored as a miss by the SERVER', function()
+    local g = start()
+    local res = act(g, 'advance', g.last.windowClosesIn + 400)
+    truthy(res.ok)
+    equal(res.state.misses, 1)
+    truthy(res.state.phase, 'the fight moves on rather than stalling')
+end)
+
+test('P7 line damage ends the fight as a snap, before the miss budget runs out', function()
+    -- tier 5 on a 10lb line: 80 line, 30 damage per mistake, maxMisses 4.
+    -- Three mistakes deal 90 -- the line goes first, deterministically.
+    local g = start({ difficulty = 5 })
+    local outcome
+    for _ = 1, 4 do
+        local res = act(g, 'advance', g.last.windowClosesIn + 400)
+        outcome = res.outcome
+        if outcome then break end
+    end
+    equal(outcome, 'snap')
+    equal(g.calls.give, 0, 'a lost fight settles nothing')
+end)
+
+test('P8 a clean fight lands the fish and scores a perfect performance', function()
+    local g = start({ difficulty = 1 })
+    local outcome
+    for _ = 1, 60 do
+        local res = answer(g)
+        outcome = res.outcome
+        if outcome then break end
+    end
+    equal(outcome, 'success', 'answering every phase correctly must land the fish')
+    truthy(H.CB['zfishing:claim'](5, g.sid, 0, false, nil).fish, 'and the claim pays')
+    equal(g.calls.ctx.perfScore, 1, 'no miss means a perfect score')
+end)
+
+test('P9 a rejected action leaves the phase and the clock untouched', function()
+    local g = start()
+    local before = H.deepcopy(g.last)
+    _G.__NOW = g.at + before.windowOpensIn + 50
+    equal(H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 9, 'left').reason, 'bad_seq')
+    equal(H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, 'teleport').reason, 'bad_action')
+    local ok = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, 1, correctFor(before))
+    truthy(ok.ok, 'seq 1 was never consumed')
+    equal(ok.state.misses, 0, 'and neither rejection was scored')
+    equal(ok.state.phaseId, before.phaseId + 1, 'exactly one transition happened')
+end)
+
+test('P10 a harder tier shortens both the telegraph and the counter window', function()
+    local easy = start({ difficulty = 1 }).last
+    local hard = start({ difficulty = 5 }).last
+    -- Durations, not timestamps: the render carries offsets from its own build moment,
+    -- so these are the real telegraph and window lengths.
+    truthy(hard.windowOpensIn < easy.windowOpensIn, 'shorter telegraph')
+    truthy((hard.windowClosesIn - hard.windowOpensIn) < (easy.windowClosesIn - easy.windowOpensIn),
+        'shorter counter window')
+    truthy(hard.maxMisses <= easy.maxMisses, 'and no more room for mistakes')
+end)
+
+test('P11 behavior changes which phases the fish picks, on an identical RNG stream', function()
+    -- Same seed for both fish, so the LCG produces the same numbers and the ONLY
+    -- difference is the weight table. No probability, no flake.
+    local function phaseRun(behavior)
+        local g = start({ behavior = behavior, difficulty = 1, seed = 20260821 })
+        local seen, dives = {}, 0
+        for _ = 1, 12 do
+            seen[#seen + 1] = g.last.phase
+            if g.last.phase == 'DIVE' then dives = dives + 1 end
+            if act(g, 'advance', g.last.windowClosesIn + 400).outcome then break end
+        end
+        return seen, dives
+    end
+    local heavySeq, heavyDives = phaseRun('steady_heavy')
+    local lightSeq, lightDives = phaseRun('steady_light')
+    truthy(heavyDives > lightDives,
+        ('a heavy fish must dive more than a light one on the same stream: %d vs %d')
+            :format(heavyDives, lightDives))
+    truthy(#heavySeq > 0 and #lightSeq > 0)
+end)
+
+test('P12 better gear widens the window and deepens the line, without touching the tier', function()
+    local plain = start({ difficulty = 3 }).last
+    local geared = start({ difficulty = 3, rig = true }).last
+    equal(plain.maxMisses, geared.maxMisses, 'gear must not change the tier')
+    truthy((geared.windowClosesIn - geared.windowOpensIn)
+           >= (plain.windowClosesIn - plain.windowOpensIn))
+end)
+
+test('P13 a missed landing gives the fish a second wind, not another fatigue break', function()
+    local g = start({ difficulty = 1 })
+    local landing
+    for _ = 1, 60 do
+        if g.last.phase == 'LANDING' then landing = g.last break end
+        if answer(g).outcome then break end
+    end
+    truthy(landing, 'a clean fight must reach the landing turn')
+    local res = act(g, 'advance', g.last.windowClosesIn + 400)   -- fumble it
+    truthy(res.ok)
+    equal(res.outcome, nil, 'a fumbled landing is not a loss')
+    truthy(res.state.staminaPct > 0, 'the fish recovers')
+    falsy(res.state.phase == 'FATIGUED',
+        'the fight resumes normally -- the fatigue counter reset when the break was taken')
+end)
+
+H.run()
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+```bash
+node tests/luarun.mjs tests/encounter_counter_pull.test.lua
+```
+
+Expected: `RUNNER ERROR` naming `server/encounter_counter_pull.lua` — the file does not exist.
+
+- [ ] **Step 3: Write the module**
 
 Create `server/encounter_counter_pull.lua`:
 
@@ -332,6 +450,11 @@ Create `server/encounter_counter_pull.lua`:
 -- the client is told what to draw and nothing more. In particular the render payload
 -- never carries `required`: a player derives the counter from the cue, which is the
 -- game, but handing an auto-counter bot the answer costs an honest client nothing.
+--
+-- Two things about time in here. State is ABSOLUTE server milliseconds, because that
+-- is what an incoming action is judged against. Renders are RELATIVE durations,
+-- because the client's GetGameTimer() is a different clock entirely and no arithmetic
+-- between the two means anything.
 
 local M = {}
 
@@ -353,8 +476,8 @@ local STAMINA_PER_COUNTER = 8
 local STAMINA_PER_REEL = 12
 local MISS_RECOVERY = 3
 local LANDING_RECOVERY = 25
--- A fake must flip at least this long before the window shuts, so the switch is
--- always something a watching player can react to rather than unavoidable RNG.
+-- A fake must flip at least this long before the window shuts, so the switch is always
+-- something a watching player can react to rather than unavoidable RNG.
 local FAKE_LEAD = 400
 
 local COUNTER = { LEFT_RUN = 'right', RIGHT_RUN = 'left', DIVE = 'brace' }
@@ -362,14 +485,14 @@ local RUNS = { 'LEFT_RUN', 'RIGHT_RUN', 'DIVE' }
 
 -- Keyed on the four behavior names that actually exist in config/fish.lua.
 local BEHAVIOR = {
-    steady_light = { LEFT_RUN = 4, RIGHT_RUN = 4, DIVE = 1 },
-    steady_heavy = { LEFT_RUN = 2, RIGHT_RUN = 2, DIVE = 6 },
+    steady_light = { LEFT_RUN = 5, RIGHT_RUN = 5, DIVE = 1 },
+    steady_heavy = { LEFT_RUN = 2, RIGHT_RUN = 2, DIVE = 7 },
     run_stop     = { LEFT_RUN = 4, RIGHT_RUN = 4, DIVE = 2 },
     erratic      = { LEFT_RUN = 3, RIGHT_RUN = 3, DIVE = 3 },
 }
 
 -- Seeded LCG rather than math.random: the fight has to be reproducible from the
--- challenge seed alone, so a test can replay one and a desync can be investigated.
+-- challenge seed alone, so a test can pin one and a desync can be investigated.
 local function rand(st)
     st.rng = (1103515245 * st.rng + 12345) % 2147483648
     return st.rng / 2147483648
@@ -387,7 +510,16 @@ local function pickRun(st)
     return RUNS[#RUNS]
 end
 
+-- Every arm* below bumps phaseId. Phase name and window lengths repeat exactly -- an
+-- id does not, and the NUI re-anchors its clock on it. Without this, two consecutive
+-- identical LEFT_RUN phases leave React's effects thinking nothing happened, so the
+-- window bar never restarts and the no-input `advance` never re-arms.
+local function bump(st)
+    st.phaseId = (st.phaseId or 0) + 1
+end
+
 local function armRun(st, now)
+    bump(st)
     st.phase = pickRun(st)
     st.required = COUNTER[st.phase]
     st.telegraphAt = now
@@ -409,8 +541,14 @@ local function armRun(st, now)
 end
 
 local function armFatigue(st, now, reelsLeft)
+    bump(st)
     st.phase = 'FATIGUED'
     st.required = 'reel'
+    -- The break the fish just took resets the count toward the next one. Tracking
+    -- "counters since the last break" rather than "counters % perFatigue" is what stops
+    -- a fumbled landing from dropping straight back into another break: with a modulo
+    -- the total is still divisible, so the fight would stall instead of resuming.
+    st.countersSinceFatigue = 0
     st.telegraphAt = now
     st.windowOpensAt = now
     st.windowClosesAt = now + FATIGUE_WINDOW
@@ -420,6 +558,7 @@ local function armFatigue(st, now, reelsLeft)
 end
 
 local function armLanding(st, now)
+    bump(st)
     st.phase = 'LANDING'
     st.required = 'reel'
     st.telegraphAt = now
@@ -448,7 +587,7 @@ function M.build(ctx)
         maxLine = math.floor(tier.line * Encounters.LineMult(gear.lineRating or 10)),
         perCounter = STAMINA_PER_COUNTER * drain,
         perReel = STAMINA_PER_REEL * drain,
-        counters = 0, misses = 0,
+        counters = 0, countersSinceFatigue = 0, misses = 0, phaseId = 0,
     }
     st.line = st.maxLine
     armRun(st, ctx.now or 0)
@@ -464,13 +603,17 @@ function M.build(ctx)
     return st, estimate
 end
 
-function M.render(enc)
+-- Durations, never timestamps. See the header.
+function M.render(enc, now)
     local st = enc.state
     return {
+        phaseId = st.phaseId,
         phase = st.phase,
-        cue = st.cue, switchAt = st.switchAt, nextCue = st.nextCue,
-        telegraphAt = st.telegraphAt,
-        windowOpensAt = st.windowOpensAt, windowClosesAt = st.windowClosesAt,
+        cue = st.cue, nextCue = st.nextCue,
+        telegraphIn = st.telegraphAt - now,
+        windowOpensIn = st.windowOpensAt - now,
+        windowClosesIn = st.windowClosesAt - now,
+        switchIn = st.switchAt and (st.switchAt - now) or nil,
         staminaPct = math.max(0, math.floor(st.stamina / st.maxStamina * 100)),
         linePct = math.max(0, math.floor(st.line / st.maxLine * 100)),
         misses = st.misses, maxMisses = st.tier.maxMisses,
@@ -496,50 +639,54 @@ function M.act(enc, action, now)
     if hit then
         if st.phase == 'LANDING' then
             st.stamina = 0
-            return { render = M.render(enc), outcome = 'success', value = 1 }
+            return { render = M.render(enc, now), outcome = 'success', value = 1 }
         elseif st.phase == 'FATIGUED' then
             st.stamina = st.stamina - st.perReel
             st.reelsLeft = (st.reelsLeft or 1) - 1
         else
             st.stamina = st.stamina - st.perCounter
             st.counters = st.counters + 1
+            st.countersSinceFatigue = st.countersSinceFatigue + 1
         end
     else
         st.misses = st.misses + 1
         st.line = st.line - st.tier.mistake
         if st.phase == 'LANDING' then
-            st.stamina = LANDING_RECOVERY      -- the fish finds a second wind
+            -- A second wind, and a clean slate toward the next break: the fish just had
+            -- one, so dropping straight back into another reads as the fight stalling.
+            st.stamina = LANDING_RECOVERY
+            st.countersSinceFatigue = 0
         else
             st.stamina = math.min(st.maxStamina, st.stamina + MISS_RECOVERY)
         end
     end
 
     if st.line <= 0 then
-        return { render = M.render(enc), outcome = 'snap', value = hit and 1 or 0 }
+        return { render = M.render(enc, now), outcome = 'snap', value = hit and 1 or 0 }
     end
     if st.misses >= st.tier.maxMisses then
-        return { render = M.render(enc), outcome = 'escape', value = hit and 1 or 0 }
+        return { render = M.render(enc, now), outcome = 'escape', value = hit and 1 or 0 }
     end
 
     if st.stamina <= 0 then
         armLanding(st, now)
     elseif st.phase == 'FATIGUED' and (st.reelsLeft or 0) > 0 then
         armFatigue(st, now, st.reelsLeft)      -- same break, fresh window
-    elseif st.phase ~= 'FATIGUED' and st.counters > 0 and st.counters % st.tier.perFatigue == 0 then
+    elseif st.phase ~= 'FATIGUED' and st.countersSinceFatigue >= st.tier.perFatigue then
         armFatigue(st, now)
     else
         armRun(st, now)
     end
 
-    return { render = M.render(enc), outcome = nil, value = hit and 1 or 0 }
+    return { render = M.render(enc, now), outcome = nil, value = hit and 1 or 0 }
 end
 
 Encounter.Register('counter_pull', M)
 ```
 
-- [ ] **Step 5: Load the module in the test harness path**
+- [ ] **Step 4: Add the npm script**
 
-The suite `dofile`s the module directly (see `start()` in Step 1), so no harness change is needed. Add the npm script now — in `tests/package.json`, add to `scripts`:
+In `tests/package.json`, add to `scripts`:
 
 ```json
     "test:encounter-counter-pull": "node luarun.mjs tests/encounter_counter_pull.test.lua",
@@ -547,46 +694,50 @@ The suite `dofile`s the module directly (see `start()` in Step 1), so no harness
 
 and append ` && npm run test:encounter-counter-pull` to `test:all`.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 ```bash
 node tests/luarun.mjs tests/encounter_counter_pull.test.lua
 ```
 
-Expected: twelve `ok -` lines then `12 tests passed`.
+Expected: thirteen `ok -` lines then `13 tests passed`.
 
-If P11 is flaky, the behavior weights are too close — widen `steady_heavy`'s DIVE weight rather than loosening the assertion. If P7 or P8 hit their loop ceilings, the fight is longer than the plan assumed; print the final render and re-derive the tier arithmetic before touching the test bounds.
+If P11 fails, the two weight tables produced the same picks on that seed — try another seed before touching the weights, and only widen `steady_heavy`'s DIVE weight if several seeds agree. If P7 or P8 hit their loop ceilings, print the final render and re-derive the tier arithmetic rather than raising the ceiling.
 
-- [ ] **Step 7: Re-run every suite**
+- [ ] **Step 6: Re-run every suite**
 
 ```bash
 cd tests && npm run test:all
 ```
 
-Expected: 10 suites, 198 + 12 = 210 tests, exit 0.
+Expected: 10 suites, 198 + 13 = 211 tests, exit 0.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add server/encounter_counter_pull.lua server/encounter.lua server/session.lua tests/encounter_counter_pull.test.lua tests/package.json
+git add server/encounter_counter_pull.lua tests/encounter_counter_pull.test.lua tests/package.json
 git commit -m "feat: add the counter-pull fight state machine"
 ```
 
 ---
 
-## Task 2: The client bridge
+## Task 3: The client bridge
 
 **Files:**
 - Create: `client/encounter.lua`
-- Modify: `client/minigame.lua` (the `zfishing:bite` handler)
+- Modify: `client/minigame.lua`
+- Create: `tests/client_encounter.test.lua`
+- Modify: `tests/package.json`
 
 **Interfaces:**
-- Consumes: the `zfishing:bite` payload's `encounter` and `difficulty` fields (Phase A); `zfishing:hook`'s `{ ok, challengeId, encounter }` (Task 1); `zfishing:encounter:act`'s `{ ok, seq, state, outcome }`.
-- Produces: NUI messages `{ action = 'encounter', type, difficulty, state, challengeId }` and `{ action = 'encounterState', state, outcome }`; NUI callback `encounterAction` accepting `{ action = <string> }`.
+- Consumes: the `zfishing:bite` payload's `encounter` and `difficulty`; `zfishing:hook`'s `{ ok, challengeId, encounter }`; `zfishing:encounter:act`'s `{ ok, seq, state, outcome }`.
+- Produces: NUI messages `{ action = 'encounter', type, difficulty, state, startedAt }` and `{ action = 'encounterState', state, outcome }`; NUI callbacks `encounterAction` (`{ action }`) and `encounterClosed` (presentation-only).
+
+**Settlement is the client's job, not the NUI's.** The moment the server reports a terminal outcome the bridge knows the fight is over and calls `zfishing:claim` itself. The NUI is told to play its ending; if it never answers, the catch still settles.
 
 - [ ] **Step 1: Keep the legacy handler off the encounter path**
 
-In `client/minigame.lua`, at the very top of the `zfishing:bite` handler, add:
+In `client/minigame.lua`, at the top of the `zfishing:bite` handler:
 
 ```lua
 RegisterNetEvent('zfishing:bite', function(data)
@@ -601,14 +752,17 @@ RegisterNetEvent('zfishing:bite', function(data)
 Create `client/encounter.lua`:
 
 ```lua
--- Encounter bridge. Routes an encounter bite to the NUI, polls the player's input,
--- and forwards one discrete action per press to the server.
+-- Encounter bridge and orchestrator.
 --
--- This file simulates NOTHING. It holds no stamina, no timer that decides anything,
--- and no notion of whether an action was correct -- the server answers all three. Its
--- only state is the sequence number and the last authoritative payload.
+-- Routes an encounter bite to the NUI, polls input, forwards one discrete action at a
+-- time, and drives settlement when the server says the fight is over.
+--
+-- It simulates NOTHING: no stamina, no timer that decides anything, no notion of
+-- whether an action was correct. The server answers all three. Its own state is the
+-- sequence number, the in-flight lock and the last authoritative payload.
 
-local ENC = { active = false, seq = 0, challengeId = nil, sessionId = nil, type = nil }
+local ENC = { active = false, seq = 0, inFlight = false,
+              challengeId = nil, sessionId = nil, type = nil }
 
 -- action -> control. All four are analog on a gamepad already, so controller support
 -- needs no separate mapping and no button mashing.
@@ -619,46 +773,60 @@ local KEYS = {
     { action = 'reel',  control = 22 },   -- the key the legacy fight already uses
 }
 
-local function stop()
-    ENC.active = false
+local function reset()
+    ENC.active, ENC.inFlight = false, false
     ENC.challengeId, ENC.sessionId, ENC.type = nil, nil, nil
     ENC.seq = 0
 end
 
--- The server stamps its windows with GetGameTimer(), which is milliseconds since the
--- game started -- a clock the NUI has no access to and cannot compare against
--- Date.now(). Translating to offsets HERE, at the one moment both clocks are readable
--- in the same breath, is the only place that conversion is correct. The NUI then adds
--- each offset to its own Date.now() on receipt.
-local TIME_FIELDS = { telegraphAt = 'telegraphIn', windowOpensAt = 'windowOpensIn',
-                      windowClosesAt = 'windowClosesIn', switchAt = 'switchIn' }
+-- Settlement. Runs once, from here, the moment the server reports a terminal outcome.
+-- The NUI is a spectator to this: if it never posts encounterClosed the catch still
+-- settles, and if it posts twice the session is already gone.
+local function settle(outcome)
+    local sessionId = ENC.sessionId
+    reset()
+    ZClient.reeling = false
+    if not sessionId then return end
 
-local function toOffsets(state)
-    if type(state) ~= 'table' then return state end
-    local now = GetGameTimer()
-    local out = {}
-    for k, v in pairs(state) do
-        local offsetKey = TIME_FIELDS[k]
-        if offsetKey then out[offsetKey] = v - now else out[k] = v end
+    Wait(700)   -- let the ending render before the catch card replaces it
+
+    -- The same door as always. `success` is ignored for an encounter session -- the
+    -- server reads its own outcome -- but the argument list is unchanged, so there is
+    -- still exactly one settlement path in the resource.
+    local res = lib.callback.await('zfishing:claim', false, sessionId, 0, false, nil)
+    if res and res.ok and res.fish then
+        SendNUIMessage({ action = 'caught',
+            label = res.fish.label, weight = res.fish.weight, quality = res.fish.quality })
+        Casting.StartDrift()
+        SetNuiFocus(true, true)
+        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
+    elseif res and res.ok then
+        TriggerEvent('zfishing:client:end',
+            (res.outcome or outcome) == 'snap' and 'line_broke' or 'fish_escaped', 'error')
+    else
+        TriggerEvent('zfishing:client:end', 'error_claim_failed', 'error')
     end
-    return out
 end
 
--- One round trip per press. The reply is authoritative: whatever it says the state is,
--- that is what the NUI draws.
+-- One request in flight at a time. Input polling and the NUI's deadline `advance` are
+-- two independent senders, and near a window edge both would claim the same seq -- the
+-- server rejects the loser as bad_seq, which is safe but costs an honest player the
+-- input they actually made. Counter-pull is discrete and human-paced, so a lock is
+-- enough; do not add a queue without evidence that one is needed.
 local function send(action)
-    if not ENC.active then return end
+    if not ENC.active or ENC.inFlight then return end
+    ENC.inFlight = true
+
     local res = lib.callback.await('zfishing:encounter:act', false,
         ENC.sessionId, ENC.challengeId, ENC.seq + 1, action)
-    if not res then return end
 
+    ENC.inFlight = false
+    if not res then return end
     if res.seq then ENC.seq = res.seq end
+
     if res.ok then
-        SendNUIMessage({ action = 'encounterState', state = toOffsets(res.state), outcome = res.outcome })
-        if res.outcome then
-            ENC.active = false
-            ZClient.reeling = false
-        end
+        SendNUIMessage({ action = 'encounterState', state = res.state, outcome = res.outcome })
+        if res.outcome then settle(res.outcome) end
         return
     end
 
@@ -666,8 +834,7 @@ local function send(action)
     -- UI nothing will ever update again.
     if res.reason == 'encounter_over' then
         SendNUIMessage({ action = 'encounterState', state = nil, outcome = res.outcome or 'timeout' })
-        ENC.active = false
-        ZClient.reeling = false
+        settle(res.outcome or 'timeout')
     end
 end
 
@@ -699,28 +866,27 @@ RegisterNetEvent('zfishing:bite', function(data)
         return TriggerEvent('zfishing:client:end', 'fish_escaped', 'error')
     end
 
-    ENC.active = true
-    ENC.seq = 0
-    ENC.sessionId = ZClient.sessionId
-    ENC.challengeId = res.challengeId
-    ENC.type = data.encounter
+    ENC.active, ENC.inFlight, ENC.seq = true, false, 0
+    ENC.sessionId, ENC.challengeId, ENC.type = ZClient.sessionId, res.challengeId, data.encounter
     ZClient.reeling = true
 
     SendNUIMessage({ action = 'encounter', type = data.encounter,
-        difficulty = data.difficulty, state = toOffsets(res.encounter),
+        difficulty = data.difficulty, state = res.encounter,
         startedAt = GetGameTimer() })
     Casting.StartFight()
     Anim.PlayClip('idle_c')
 
-    -- Input polling. One event per PRESS, never per frame -- the loop itself runs at
-    -- frame rate because that is how FiveM reads a key, but it only ever talks to the
-    -- server on an edge.
+    -- Input polling. One event per PRESS, never per frame -- the loop runs at frame
+    -- rate because that is how FiveM reads a key, but it only talks to the server on an
+    -- edge, and only when no request is already out.
     CreateThread(function()
         while ENC.active and ZClient.active do
-            for _, k in ipairs(KEYS) do
-                if IsDisabledControlJustPressed(0, k.control) then
-                    send(k.action)
-                    break
+            if not ENC.inFlight then
+                for _, k in ipairs(KEYS) do
+                    if IsDisabledControlJustPressed(0, k.control) then
+                        send(k.action)
+                        break
+                    end
                 end
             end
             Wait(0)
@@ -728,63 +894,257 @@ RegisterNetEvent('zfishing:bite', function(data)
     end)
 end)
 
--- The NUI tells us its local window expired. The server decides what that means; it
--- refuses an `advance` that arrives before the deadline it set.
+-- The NUI's local window expired. The server decides what that means, and refuses an
+-- `advance` that arrives before the deadline it set.
 RegisterNUICallback('encounterAction', function(body, cb)
     cb({})
     if type(body) == 'table' and type(body.action) == 'string' then send(body.action) end
 end)
 
--- Settlement is the same door as always: zfishing:claim. The success flag we pass is
--- ignored for an encounter session -- the server reads its own outcome -- but the
--- argument list is unchanged, so there is still exactly one settlement path.
-RegisterNUICallback('encounterDone', function(_, cb)
-    cb({})
-    if not ZClient.sessionId then return end
-    stop()
-    ZClient.reeling = false
-    local res = lib.callback.await('zfishing:claim', false, ZClient.sessionId, 0, false, nil)
-    if res and res.ok and res.fish then
-        SendNUIMessage({ action = 'caught',
-            label = res.fish.label, weight = res.fish.weight, quality = res.fish.quality })
-        Casting.StartDrift()
-        SetNuiFocus(true, true)
-        PlaySoundFrontend(-1, 'CHECKPOINT_PERFECT', 'HUD_MINI_GAME_SOUNDSET', true)
-    elseif res and res.ok then
-        local key = res.outcome == 'snap' and 'line_broke' or 'fish_escaped'
-        TriggerEvent('zfishing:client:end', key, 'error')
-    else
-        TriggerEvent('zfishing:client:end', 'error_claim_failed', 'error')
+-- Presentation close only. Settlement already happened in settle(); this exists so the
+-- NUI can say its ending animation is done. It grants no permission.
+RegisterNUICallback('encounterClosed', function(_, cb) cb({}) end)
+
+AddEventHandler('zfishing:client:end', function() reset() end)
+```
+
+- [ ] **Step 3: Write the bridge tests**
+
+Create `tests/client_encounter.test.lua`:
+
+```lua
+-- The client encounter bridge. Run from the resource root:
+--   node tests/luarun.mjs tests/client_encounter.test.lua
+--
+-- Drives client/encounter.lua against stubbed FiveM natives and a scripted server, so
+-- the lifecycle it owns -- routing, sequencing, the in-flight lock, settlement -- is
+-- tested directly rather than inferred from a server suite.
+
+dofile('tests/harness.lua')
+local test, equal, truthy, falsy = H.test, H.equal, H.truthy, H.falsy
+
+local sent, nui, ended
+
+-- Installs the client-side host: control stubs, a scripted callback server, and the
+-- recorders the assertions read.
+local function loadBridge(script)
+    H.installHost()
+    sent, nui, ended = {}, {}, {}
+
+    local pressed = {}
+    _G.__PRESS = function(control) pressed[control] = true end
+    _G.IsDisabledControlJustPressed = function(_, control)
+        if pressed[control] then pressed[control] = nil; return true end
+        return false
+    end
+    _G.IsDisabledControlPressed = function() return false end
+    _G.PlaySoundFrontend = function() end
+    _G.SetPadShake = function() end
+    _G.SetNuiFocus = function() end
+    _G.SendNUIMessage = function(msg) nui[#nui + 1] = msg end
+    _G.RegisterNUICallback = function(name, fn) H.CB['nui:' .. name] = fn end
+    _G.TriggerEvent = function(name, key) ended[#ended + 1] = { name = name, key = key } end
+
+    _G.lib = { callback = { await = function(name, _, ...)
+        sent[#sent + 1] = { name = name, args = { ... } }
+        return script(name, ...)
+    end } }
+
+    _G.ZClient = { active = true, reeling = false, sessionId = 'sess-1', hud = {} }
+    _G.Casting = { diving = false, StartFight = function() end, StartDrift = function() end }
+    _G.Anim = { PlayClip = function() end }
+
+    dofile('client/minigame.lua')
+    dofile('client/encounter.lua')
+end
+
+local OPENING = { phaseId = 1, phase = 'LEFT_RUN', cue = 'LEFT_RUN',
+    telegraphIn = 0, windowOpensIn = 800, windowClosesIn = 2000,
+    staminaPct = 100, linePct = 100, misses = 0, maxMisses = 5 }
+
+-- A server that hooks successfully and accepts every action.
+local function happyServer(extra)
+    local seq = 0
+    return function(name)
+        if name == 'zfishing:hook' then
+            return { ok = true, challengeId = 'sess-1#42', encounter = OPENING }
+        elseif name == 'zfishing:encounter:act' then
+            seq = seq + 1
+            if extra and extra.outcomeAt == seq then
+                return { ok = true, seq = seq, state = OPENING, outcome = extra.outcome }
+            end
+            return { ok = true, seq = seq, state = OPENING }
+        elseif name == 'zfishing:claim' then
+            return { ok = true, fish = { label = 'Pike', weight = 6.0, quality = 3 } }
+        end
+        return { ok = true }
+    end
+end
+
+local function biteAndHook(encounter)
+    -- The bite handler blocks on the hook QTE; arm SPACE before dispatching it.
+    _G.__PRESS(22)
+    H.NETEVENTS['zfishing:bite']({ encounter = encounter, difficulty = 2, hookWindow = 1500 })
+end
+
+local function actCalls()
+    local n = 0
+    for _, s in ipairs(sent) do if s.name == 'zfishing:encounter:act' then n = n + 1 end end
+    return n
+end
+
+local function nuiWith(action)
+    for _, m in ipairs(nui) do if m.action == action then return m end end
+    return nil
+end
+
+test('B1 an encounter bite never enters the legacy minigame', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    falsy(nuiWith('reel'), 'the legacy reel view must not open for an encounter session')
+    truthy(nuiWith('encounter'))
+end)
+
+test('B2 a legacy bite never enters the encounter bridge', function()
+    loadBridge(happyServer())
+    biteAndHook('legacy_tension')
+    falsy(nuiWith('encounter'), 'the encounter view must not open for a legacy session')
+end)
+
+test('B3 the hook answer opens the authoritative encounter view', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    local msg = nuiWith('encounter')
+    truthy(msg)
+    equal(msg.type, 'counter_pull')
+    equal(msg.state.phaseId, 1)
+    equal(msg.state.windowOpensIn, 800, 'durations pass through untouched')
+end)
+
+test('B4 the first accepted input submits seq 1, the next submits seq 2', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    local seqs = {}
+    for _, s in ipairs(sent) do
+        if s.name == 'zfishing:encounter:act' then seqs[#seqs + 1] = s.args[3] end
+    end
+    equal(seqs[1], 1); equal(seqs[2], 2)
+end)
+
+test('B5 no action payload carries a timing value or an encounter type', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    H.CB['nui:encounterAction']({ action = 'advance', atMs = 1234, type = 'sonar_strike' })
+    for _, s in ipairs(sent) do
+        if s.name == 'zfishing:encounter:act' then
+            equal(#s.args, 4, 'sessionId, challengeId, seq, action -- and nothing else')
+            equal(s.args[4], 'advance')
+        end
     end
 end)
 
-AddEventHandler('zfishing:client:end', function() stop() end)
+test('B6 a terminal outcome stops input polling and settles once', function()
+    loadBridge(happyServer({ outcomeAt = 1, outcome = 'success' }))
+    biteAndHook('counter_pull')
+    H.CB['nui:encounterAction']({ action = 'advance' })
+
+    local claims = 0
+    for _, s in ipairs(sent) do if s.name == 'zfishing:claim' then claims = claims + 1 end end
+    equal(claims, 1, 'the client settles exactly once, without waiting on the NUI')
+
+    local before = actCalls()
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    equal(actCalls(), before, 'no further action is accepted after the fight ends')
+end)
+
+test('B7 settlement does not need the NUI to ask for it', function()
+    loadBridge(happyServer({ outcomeAt = 1, outcome = 'snap' }))
+    biteAndHook('counter_pull')
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    local claimed = false
+    for _, s in ipairs(sent) do if s.name == 'zfishing:claim' then claimed = true end end
+    truthy(claimed, 'encounterClosed was never called and the catch still settled')
+    truthy(H.CB['nui:encounterClosed'], 'the presentation-close callback still exists')
+end)
+
+test('B8 a lost fight reports the SERVER outcome to the player', function()
+    loadBridge(function(name)
+        if name == 'zfishing:hook' then
+            return { ok = true, challengeId = 'sess-1#42', encounter = OPENING }
+        elseif name == 'zfishing:encounter:act' then
+            return { ok = true, seq = 1, state = OPENING, outcome = 'snap' }
+        elseif name == 'zfishing:claim' then
+            return { ok = true, fish = nil, outcome = 'snap' }
+        end
+        return { ok = true }
+    end)
+    biteAndHook('counter_pull')
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    local last = ended[#ended]
+    truthy(last)
+    equal(last.key, 'line_broke', 'a server-decided snap must read as a snapped line')
+end)
+
+test('B9 teardown resets the bridge so a stale action goes nowhere', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    H.EVENTS['zfishing:client:end']()
+    local before = actCalls()
+    H.CB['nui:encounterAction']({ action = 'advance' })
+    equal(actCalls(), before, 'a torn-down bridge sends nothing')
+end)
+
+test('B10 a hook the server refuses ends the session cleanly', function()
+    loadBridge(function(name)
+        if name == 'zfishing:hook' then return { ok = false, reason = 'too_slow' } end
+        return { ok = true }
+    end)
+    biteAndHook('counter_pull')
+    equal(actCalls(), 0)
+    truthy(#ended > 0, 'the player is told the fish got away')
+end)
+
+H.run()
 ```
 
-- [ ] **Step 3: Verify the legacy path is untouched**
+Add the script to `tests/package.json`:
+
+```json
+    "test:client-encounter": "node luarun.mjs tests/client_encounter.test.lua",
+```
+
+and append ` && npm run test:client-encounter` to `test:all`.
+
+- [ ] **Step 4: Run the bridge tests**
 
 ```bash
-node tests/luarun.mjs tests/water_validation_preservation.test.lua
+node tests/luarun.mjs tests/client_encounter.test.lua
 ```
 
-Expected: `11 tests passed`. That suite drives `client/main.lua` and the cast/cancel lifecycle.
+Expected: ten `ok -` lines then `10 tests passed`.
+
+`settle()` calls `Wait(700)`; `H.installHost` stubs `Wait` as a no-op, so the tests run synchronously. If B6 or B7 report zero claims, check that the stub is in place before `client/encounter.lua` is loaded.
+
+- [ ] **Step 5: Re-run every suite**
 
 ```bash
 cd tests && npm run test:all
 ```
 
-Expected: 10 suites, 210 tests, exit 0.
+Expected: 11 suites, 221 tests, exit 0.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add client/encounter.lua client/minigame.lua
-git commit -m "feat: bridge encounter input between the NUI and the server"
+git add client/encounter.lua client/minigame.lua tests/client_encounter.test.lua tests/package.json
+git commit -m "feat: orchestrate the counter-pull fight from the client bridge"
 ```
 
 ---
 
-## Task 3: The NUI
+## Task 4: The NUI
 
 **Files:**
 - Create: `web/src/encounters/types.ts`
@@ -792,10 +1152,6 @@ git commit -m "feat: bridge encounter input between the NUI and the server"
 - Create: `web/src/encounters/CounterPull.tsx`
 - Modify: `web/src/App.tsx`
 - Modify: `web/src/style.css`
-
-**Interfaces:**
-- Consumes: `encounter` and `encounterState` NUI messages from Task 2; `fetchNui('encounterAction', { action })` and `fetchNui('encounterDone')`.
-- Produces: an `encounter` view in `App.tsx`'s `View` union.
 
 - [ ] **Step 1: Define the payload types**
 
@@ -807,23 +1163,23 @@ export type Outcome = 'success' | 'escape' | 'snap' | 'timeout'
 
 export type CounterPullPhase = 'LEFT_RUN' | 'RIGHT_RUN' | 'DIVE' | 'FATIGUED' | 'LANDING'
 
-// What server/encounter_counter_pull.lua's M.render returns, after client/encounter.lua
-// has converted the server's GetGameTimer() stamps into offsets (see toOffsets there --
-// the two clocks are unrelated and cannot be compared directly).
+// Exactly what server/encounter_counter_pull.lua's M.render(enc, now) returns.
 //
-// Note what is NOT here: the required counter. The player reads it off the cue; the
-// payload does not spell it out.
+// Every time value is a DURATION from the moment the server built this payload, never
+// a timestamp: the server's clock and this page's clock share no origin. The component
+// anchors them to its own Date.now() once, keyed on phaseId.
+//
+// Note what is NOT here: the required counter. The player reads it off the cue.
 export type CounterPullState = {
+  /** increments on every authoritative transition, including a repeat of the same phase */
+  phaseId: number
   phase: CounterPullPhase
   cue: CounterPullPhase
   nextCue?: CounterPullPhase
-  /** ms from when this payload was built until the cue appears (may be negative) */
   telegraphIn: number
-  /** ms until the counter window opens */
   windowOpensIn: number
-  /** ms until it shuts */
   windowClosesIn: number
-  /** ms until a fake flips to nextCue; absent when the fish is not faking */
+  /** present only when the fish is faking */
   switchIn?: number
   staminaPct: number
   linePct: number
@@ -851,14 +1207,13 @@ import CounterPull from './CounterPull'
 import type { CounterPullState, EncounterMessage, Outcome } from './types'
 
 // One shell for every encounter, so the three of them read as one product: same panel
-// material, same typography, same success/failure language. Only the fight inside
-// differs.
+// material, same typography, same success/failure language. Only the fight differs.
 export default function EncounterHost({ msg }: { msg: EncounterMessage }) {
   const [state, setState] = useState<CounterPullState>(msg.state)
   const [outcome, setOutcome] = useState<Outcome | null>(null)
 
-  // React state moves on a TRANSITION, never per frame. The per-frame work lives
-  // inside the child's requestAnimationFrame loop, reading refs.
+  // React state moves on a TRANSITION, never per frame. The per-frame work lives in
+  // the child's requestAnimationFrame loop and writes straight to a DOM node.
   useNuiEvent((m) => {
     if (m.action !== 'encounterState') return
     if (m.state) setState(m.state)
@@ -868,7 +1223,7 @@ export default function EncounterHost({ msg }: { msg: EncounterMessage }) {
   useEffect(() => { setState(msg.state); setOutcome(null) }, [msg.startedAt])
 
   if (msg.type === 'counter_pull') {
-    return <CounterPull state={state} outcome={outcome} difficulty={msg.difficulty} />
+    return <CounterPull state={state} outcome={outcome} />
   }
   return null
 }
@@ -880,83 +1235,84 @@ Create `web/src/encounters/CounterPull.tsx`:
 
 ```tsx
 import type { CSSProperties } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchNui } from '../hooks/useNui'
 import { t } from '../i18n'
 import Keycap from '../components/Keycap'
 import type { CounterPullPhase, CounterPullState, Outcome } from './types'
 
-// Direction, glyph and key for each phase. Every cue is carried by shape and motion
-// and text as well as position -- never by colour alone.
+// Direction, glyph and key per phase. Every cue is carried by shape, motion and text as
+// well as position -- never by colour alone.
 const CUES: Record<CounterPullPhase, { glyph: string; key: string; label: string; dir: -1 | 0 | 1 }> = {
-  LEFT_RUN:  { glyph: '◀', key: 'D', label: 'enc_cp_left',    dir: -1 },
-  RIGHT_RUN: { glyph: '▶', key: 'A', label: 'enc_cp_right',   dir: 1 },
-  DIVE:      { glyph: '▼', key: 'S', label: 'enc_cp_dive',    dir: 0 },
-  FATIGUED:  { glyph: '⟳', key: 'SPACE', label: 'enc_cp_reel', dir: 0 },
-  LANDING:   { glyph: '⤒', key: 'SPACE', label: 'enc_cp_land', dir: 0 },
+  LEFT_RUN:  { glyph: '◀', key: 'D',     label: 'enc_cp_left',  dir: -1 },
+  RIGHT_RUN: { glyph: '▶', key: 'A',     label: 'enc_cp_right', dir: 1 },
+  DIVE:      { glyph: '▼', key: 'S',     label: 'enc_cp_dive',  dir: 0 },
+  FATIGUED:  { glyph: '⟳', key: 'SPACE', label: 'enc_cp_reel',  dir: 0 },
+  LANDING:   { glyph: '⤒', key: 'SPACE', label: 'enc_cp_land',  dir: 0 },
 }
 
 export default function CounterPull(
-  { state, outcome }: { state: CounterPullState; outcome: Outcome | null; difficulty: number }
+  { state, outcome }: { state: CounterPullState; outcome: Outcome | null }
 ) {
-  // The payload arrives as offsets from "now"; anchor them to this client's clock once,
-  // on receipt. Anchoring per render would drift the window every time React ran.
-  const anchor = useRef(Date.now())
+  // One deterministic anchoring per authoritative phase, keyed on phaseId -- a phase can
+  // repeat with an identical name and identical durations, and a ref mutated inside an
+  // effect would leave the other effects reading the previous anchor.
+  const timing = useMemo(() => {
+    const receivedAt = Date.now()
+    return {
+      opensAt: receivedAt + state.windowOpensIn,
+      closesAt: receivedAt + state.windowClosesIn,
+      switchAt: state.switchIn === undefined ? undefined : receivedAt + state.switchIn,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.phaseId])
+
   const [shown, setShown] = useState<CounterPullPhase>(state.cue)
   const barRef = useRef<HTMLDivElement | null>(null)
-  const advancedRef = useRef(false)
 
-  const opensAt = anchor.current + state.windowOpensIn
-  const closesAt = anchor.current + state.windowClosesIn
+  useEffect(() => { setShown(state.cue) }, [state.phaseId, state.cue])
 
-  // A new phase: re-anchor, redraw the cue, re-arm the advance guard.
-  useEffect(() => {
-    anchor.current = Date.now()
-    setShown(state.cue)
-    advancedRef.current = false
-  }, [state.windowOpensIn, state.cue, state.phase])
-
-  // The only per-frame work in the component, and it writes straight to the DOM node.
-  // Going through React here would re-render the whole panel sixty times a second to
-  // move one bar.
+  // The only per-frame work, and it writes straight to the DOM node. Going through
+  // React here would re-render the whole panel sixty times a second to move one bar.
   useEffect(() => {
     let raf = 0
     const tick = () => {
       const el = barRef.current
       if (el) {
-        const span = Math.max(1, closesAt - opensAt)
-        const p = Math.min(1, Math.max(0, (Date.now() - opensAt) / span))
+        const span = Math.max(1, timing.closesAt - timing.opensAt)
+        const p = Math.min(1, Math.max(0, (Date.now() - timing.opensAt) / span))
         el.style.width = `${(1 - p) * 100}%`
       }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [opensAt, closesAt])
+  }, [timing])
 
   // The fish visibly changes its mind. A state change, not a frame update.
   useEffect(() => {
-    if (state.switchIn === undefined || !state.nextCue) return
+    if (timing.switchAt === undefined || !state.nextCue) return
     const id = setTimeout(() => setShown(state.nextCue as CounterPullPhase),
-      Math.max(0, state.switchIn))
+      Math.max(0, timing.switchAt - Date.now()))
     return () => clearTimeout(id)
-  }, [state.switchIn, state.nextCue])
+  }, [timing, state.nextCue])
 
-  // Our window expired and the player did nothing. Tell the server once; it decides
-  // what that means, and refuses this outright if its own deadline has not passed.
+  // Our window expired and the player did nothing. Tell the server once per phase; it
+  // decides what that means, and refuses this outright if its own deadline has not
+  // passed. Re-armed by phaseId, so a repeated phase advances too.
   useEffect(() => {
     if (outcome) return
     const id = setTimeout(() => {
-      if (advancedRef.current) return
-      advancedRef.current = true
       fetchNui('encounterAction', { action: 'advance' })
-    }, Math.max(0, state.windowClosesIn) + 300)
+    }, Math.max(0, timing.closesAt - Date.now()) + 300)
     return () => clearTimeout(id)
-  }, [state.windowClosesIn, outcome])
+  }, [timing, outcome])
 
+  // Presentation close only. The client already settled the catch; this just reports
+  // that the ending has played.
   useEffect(() => {
     if (!outcome) return
-    const id = setTimeout(() => fetchNui('encounterDone', {}), 700)
+    const id = setTimeout(() => fetchNui('encounterClosed', {}), 700)
     return () => clearTimeout(id)
   }, [outcome])
 
@@ -997,7 +1353,7 @@ export default function CounterPull(
 
 - [ ] **Step 4: Route the view**
 
-In `web/src/App.tsx`, add `'encounter'` to the `View` union, import `EncounterHost`, add the message case:
+In `web/src/App.tsx`, add `'encounter'` to the `View` union, import `EncounterHost`, add the message cases:
 
 ```tsx
       case 'encounter':
@@ -1019,8 +1375,8 @@ and the render branch:
 In `web/src/style.css`, next to the existing `.reel-panel` rules, append:
 
 ```css
-/* Encounter shell. Inherits the panel material, rail colour and radius from
-   .hud-panel so the three encounters read as one product with the rest of the HUD. */
+/* Encounter shell. Inherits the panel material, rail colour and radius from .hud-panel
+   so the encounters read as one product with the rest of the HUD. */
 .enc-panel { min-width: 22vw; }
 
 /* The cue leans along X by its own direction, so LEFT/RIGHT/DIVE are distinguishable
@@ -1051,7 +1407,6 @@ In `web/src/style.css`, next to the existing `.reel-panel` rules, append:
   font-size: 1.5vh; letter-spacing: .06em; text-transform: uppercase;
 }
 
-/* A fake flip is a visible event, not just a swapped glyph. */
 .enc-cue--left_run .enc-glyph,
 .enc-cue--right_run .enc-glyph { animation: enc-nudge 520ms ease-in-out infinite; }
 .enc-cue--dive .enc-glyph { animation: enc-sink 620ms ease-in-out infinite; }
@@ -1064,11 +1419,7 @@ In `web/src/style.css`, next to the existing `.reel-panel` rules, append:
 }
 ```
 
-`--rail`, `--warn` and `--danger` are already defined on `.hud-panel` and its
-`--danger` modifier, so the encounter panel picks up the existing danger treatment
-without redefining a single colour.
-
-- [ ] **Step 6: Type-check and build**
+- [ ] **Step 6: Type-check**
 
 ```bash
 cd web && npx tsc --noEmit
@@ -1085,40 +1436,34 @@ git commit -m "feat: render the counter-pull fight in the NUI"
 
 ---
 
-## Task 4: Web tests and locale strings
+## Task 5: Web tests and locale strings
 
 **Files:**
 - Create: `web/src/encounters/__tests__/CounterPull.test.tsx`
 - Modify: `locales/en.json`, `locales/th.json`
 
-**Interfaces:**
-- Consumes: `CounterPull` and its props from Task 3.
-
 - [ ] **Step 1: Add the strings**
 
 Add to **both** locale files:
 
-| key | en |
-| --- | --- |
-| `enc_cp_title` | `Counter the fish` |
-| `enc_cp_left` | `Running left — pull right` |
-| `enc_cp_right` | `Running right — pull left` |
-| `enc_cp_dive` | `Diving — brace` |
-| `enc_cp_reel` | `Tired — reel!` |
-| `enc_cp_land` | `Land it!` |
-| `enc_stamina` | `Fish stamina` |
-| `enc_line` | `Mistakes` |
-| `enc_outcome_success` | `Landed!` |
-| `enc_outcome_escape` | `It got away` |
-| `enc_outcome_snap` | `Your line snapped` |
-| `enc_outcome_timeout` | `Out of time` |
-
-Thai equivalents go in `locales/th.json` under the same keys.
+| key | en | th |
+| --- | --- | --- |
+| `enc_cp_title` | `Counter the fish` | `สู้กับปลา` |
+| `enc_cp_left` | `Running left — pull right` | `ปลาวิ่งซ้าย — ดึงขวา` |
+| `enc_cp_right` | `Running right — pull left` | `ปลาวิ่งขวา — ดึงซ้าย` |
+| `enc_cp_dive` | `Diving — brace` | `ปลาดำ — ยันไว้` |
+| `enc_cp_reel` | `Tired — reel!` | `ปลาหมดแรง — รีล!` |
+| `enc_cp_land` | `Land it!` | `ดึงขึ้นเลย!` |
+| `enc_stamina` | `Fish stamina` | `แรงปลา` |
+| `enc_line` | `Mistakes` | `พลาด` |
+| `enc_outcome_success` | `Landed!` | `ได้ปลาแล้ว!` |
+| `enc_outcome_escape` | `It got away` | `ปลาหลุด` |
+| `enc_outcome_snap` | `Your line snapped` | `สายขาด` |
+| `enc_outcome_timeout` | `Out of time` | `หมดเวลา` |
 
 - [ ] **Step 2: Write the component tests**
 
-Create `web/src/encounters/__tests__/CounterPull.test.tsx`. These assert state
-transitions, not markup shape:
+Create `web/src/encounters/__tests__/CounterPull.test.tsx`:
 
 ```tsx
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1135,7 +1480,7 @@ vi.mock('../../hooks/useNui', () => ({
 }))
 
 const base = (over: Partial<CounterPullState> = {}): CounterPullState => ({
-  phase: 'LEFT_RUN', cue: 'LEFT_RUN',
+  phaseId: 1, phase: 'LEFT_RUN', cue: 'LEFT_RUN',
   telegraphIn: 0, windowOpensIn: 800, windowClosesIn: 2000,
   staminaPct: 100, linePct: 100, misses: 0, maxMisses: 5,
   ...over,
@@ -1149,7 +1494,7 @@ describe('CounterPull', () => {
     const seen = new Set<string>()
     for (const phase of ['LEFT_RUN', 'RIGHT_RUN', 'DIVE', 'FATIGUED', 'LANDING'] as const) {
       const { unmount } = render(
-        <CounterPull state={base({ phase, cue: phase })} outcome={null} difficulty={2} />
+        <CounterPull state={base({ phase, cue: phase })} outcome={null} />
       )
       const cue = document.querySelector('.enc-cue') as HTMLElement
       expect(cue.className).toContain(phase.toLowerCase())
@@ -1166,7 +1511,7 @@ describe('CounterPull', () => {
     render(
       <CounterPull
         state={base({ phase: 'DIVE', cue: 'LEFT_RUN', nextCue: 'DIVE', switchIn: 600 })}
-        outcome={null} difficulty={4}
+        outcome={null}
       />
     )
     expect(document.querySelector('.enc-cue')!.className).toContain('left_run')
@@ -1176,46 +1521,44 @@ describe('CounterPull', () => {
 
   it('carries the danger treatment when the line is nearly gone', () => {
     const { container, rerender } = render(
-      <CounterPull state={base({ linePct: 90 })} outcome={null} difficulty={2} />
+      <CounterPull state={base({ linePct: 90 })} outcome={null} />
     )
     expect(container.querySelector('.hud-panel--danger')).toBeNull()
-    rerender(<CounterPull state={base({ linePct: 30 })} outcome={null} difficulty={2} />)
+    rerender(<CounterPull state={base({ phaseId: 2, linePct: 30 })} outcome={null} />)
     expect(container.querySelector('.hud-panel--danger')).not.toBeNull()
   })
 
   it('posts advance exactly once after the window closes', () => {
-    render(<CounterPull state={base()} outcome={null} difficulty={2} />)
+    render(<CounterPull state={base()} outcome={null} />)
     act(() => { vi.advanceTimersByTime(1500) })
     expect(posted.filter((p) => p.data?.action === 'advance')).toHaveLength(0)
     act(() => { vi.advanceTimersByTime(1500) })
-    const advances = posted.filter((p) => p.data?.action === 'advance')
-    expect(advances).toHaveLength(1)
+    expect(posted.filter((p) => p.data?.action === 'advance')).toHaveLength(1)
     act(() => { vi.advanceTimersByTime(5000) })
     expect(posted.filter((p) => p.data?.action === 'advance')).toHaveLength(1)
   })
 
-  it('re-arms advance for the next phase', () => {
-    const { rerender } = render(<CounterPull state={base()} outcome={null} difficulty={2} />)
+  it('re-arms advance for a repeated phase with identical timings', () => {
+    // The case phaseId exists for: same name, same durations, different phase.
+    const { rerender } = render(<CounterPull state={base()} outcome={null} />)
     act(() => { vi.advanceTimersByTime(2400) })
     expect(posted.filter((p) => p.data?.action === 'advance')).toHaveLength(1)
 
-    rerender(
-      <CounterPull state={base({ phase: 'DIVE', cue: 'DIVE', windowOpensIn: 700, windowClosesIn: 1900 })}
-        outcome={null} difficulty={2} />
-    )
-    act(() => { vi.advanceTimersByTime(2300) })
+    rerender(<CounterPull state={base({ phaseId: 2 })} outcome={null} />)
+    act(() => { vi.advanceTimersByTime(2400) })
     expect(posted.filter((p) => p.data?.action === 'advance')).toHaveLength(2)
   })
 
-  it('renders the outcome and closes the fight through encounterDone', () => {
-    render(<CounterPull state={base()} outcome="snap" difficulty={2} />)
+  it('renders the outcome and closes the presentation', () => {
+    render(<CounterPull state={base()} outcome="snap" />)
     expect(document.querySelector('.enc-outcome')!.textContent!.length).toBeGreaterThan(0)
     act(() => { vi.advanceTimersByTime(800) })
-    expect(posted.some((p) => p.event === 'encounterDone')).toBe(true)
+    expect(posted.some((p) => p.event === 'encounterClosed')).toBe(true)
+    expect(posted.some((p) => p.event === 'encounterDone')).toBe(false)
   })
 
   it('never sends the server a timing value it could trust', () => {
-    render(<CounterPull state={base()} outcome={null} difficulty={2} />)
+    render(<CounterPull state={base()} outcome={null} />)
     act(() => { vi.advanceTimersByTime(3000) })
     for (const p of posted) {
       const keys = Object.keys(p.data ?? {})
@@ -1231,7 +1574,7 @@ describe('CounterPull', () => {
 cd web && npm test
 ```
 
-Expected: 71 existing plus the new file's tests, all passing.
+Expected: 71 existing plus 7 new, all passing.
 
 - [ ] **Step 4: Commit**
 
@@ -1242,19 +1585,16 @@ git commit -m "test: cover the counter-pull UI state transitions"
 
 ---
 
-## Task 5: Wire, build and document
+## Task 6: Wire, build and document
 
 **Files:**
 - Modify: `fxmanifest.lua`
 - Rebuild and commit: `web/dist`
-- Modify: `docs/ARCHITECTURE.md`
-- Modify: `docs/testing/zfishing-live-e2e-checklist.md`
+- Modify: `docs/ARCHITECTURE.md`, `docs/testing/zfishing-live-e2e-checklist.md`
 
 - [ ] **Step 1: Load the new files**
 
-In `fxmanifest.lua`, add `'server/encounter_counter_pull.lua',` to `server_scripts`
-immediately after `'server/encounter.lua',`, and `'client/encounter.lua',` to
-`client_scripts` immediately after `'client/minigame.lua',`.
+In `fxmanifest.lua`, add `'server/encounter_counter_pull.lua',` to `server_scripts` immediately after `'server/encounter.lua',`, and `'client/encounter.lua',` to `client_scripts` immediately after `'client/minigame.lua',`.
 
 - [ ] **Step 2: Rebuild the NUI bundle**
 
@@ -1262,9 +1602,7 @@ immediately after `'server/encounter.lua',`, and `'client/encounter.lua',` to
 cd web && npm run build
 ```
 
-`web/dist` is committed to this repository. Without this step the running resource has
-the new Lua and none of the UI, and a forced counter-pull would leave the player
-staring at nothing.
+`web/dist` is committed to this repository. Without this the running resource has the new Lua and none of the UI, and a forced counter-pull leaves the player staring at nothing.
 
 - [ ] **Step 3: Re-run everything**
 
@@ -1272,32 +1610,27 @@ staring at nothing.
 cd tests && npm run test:all
 ```
 
-Expected: 10 suites, 210 tests, exit 0.
+Expected: 11 suites, 221 tests, exit 0.
 
 ```bash
 cd web && npm test
 ```
 
-Expected: all suites pass. The Lua hash-tree snapshot in
-`bundleRebuildPreservation.test.ts` will fail — Lua changed deliberately, so re-record
-it with `npx vitest --run -u src/__tests__/bundleRebuildPreservation.test.ts`, which is
-what every Lua-touching commit in this repo has done.
+The Lua hash-tree snapshot in `bundleRebuildPreservation.test.ts` will fail — Lua changed deliberately. Re-record it, which is what every Lua-touching commit in this repo has done:
+
+```bash
+cd web && npx vitest --run -u src/__tests__/bundleRebuildPreservation.test.ts
+```
+
+Then re-run `npm test` and expect everything green.
 
 - [ ] **Step 4: Document**
 
-Add `### 12.10 Counter-Pull Fight` to `docs/ARCHITECTURE.md`: the five phases and their
-counters, the grace window and why it is 250ms, the tier table, how fakes stay fair,
-the two failure clocks (line damage and miss count) and why both exist, and the
-statement that the render payload never carries `required`.
+Add `### 12.10 Counter-Pull Fight` to `docs/ARCHITECTURE.md`: the five phases and their counters; the 250ms grace and why; the tier table; `phaseId` and what breaks without it; `countersSinceFatigue` and the fumbled-landing case it fixes; the two failure clocks (line damage, miss count) and why both exist; the relative-duration render contract and the clock-domain reason behind it; the client-orchestrates-settlement boundary; and the statement that the render payload never carries `required`.
 
-Add a change-history entry under `## 13`.
+Add a change-history entry under `## 13` recording what Phase B did **not** ship: directional world feedback, deferred to Phase G.
 
-Add an "Encounter system" section to `docs/testing/zfishing-live-e2e-checklist.md`
-covering: FORCED counter-pull at tier 1 and tier 5; each of the four counters and the
-fatigue reel; a fake telegraph at tier 3+; a deliberate line snap; a deliberate walk-away
-timeout; an admin changing the mode mid-fight and the fight not changing; two players in
-counter-pull simultaneously; and resmon at idle, one fight, and several. Leave every box
-unticked — nobody has run them.
+Add an "Encounter system" section to `docs/testing/zfishing-live-e2e-checklist.md` covering: FORCED counter-pull at tier 1 and tier 5; each of the four counters and the fatigue reel; a fake telegraph at tier 3+; a deliberate line snap; a deliberate walk-away timeout; a fumbled landing followed by a normally resumed fight; an admin changing the mode mid-fight and the fight not changing; two players in counter-pull simultaneously; and resmon at idle, one fight, and several. Leave every box unticked — nobody has run them.
 
 - [ ] **Step 5: Commit**
 
@@ -1317,18 +1650,13 @@ cd web && npm test && npx tsc --noEmit
 
 Expected state at the end of Phase B:
 
-- `Encounter.Playable('counter_pull')` is true, so an admin setting FORCED to
-  counter-pull gets the real fight rather than a downgrade to legacy.
-- No fish resolves to counter-pull on its own — no `encounter` field ships until Phase F,
-  so DEFAULT still means the legacy fight for everyone.
+- `Encounter.Playable('counter_pull')` is true, so an admin setting FORCED to counter-pull gets the real fight rather than a downgrade to legacy.
+- No fish resolves to counter-pull on its own — no `encounter` field ships until Phase F, so DEFAULT still means the legacy fight for everyone.
 - `fish_mindgame` and `sonar_strike` still downgrade to legacy.
 - Live behaviour is **unverified**: nothing in this phase has been run inside FiveM.
 
-## Known limitation to carry into the completion report
+## Known limitations to carry into the completion report
 
-The fake telegraph sends `nextCue` in the same payload as `cue`, because the NUI has to
-draw the flip and a round trip at that moment would cost exactly the reaction time the
-mechanic is testing. A modified client can therefore read the real direction up front
-and ignore fakes entirely. It gains immunity to a tier-3+ flourish, not free wins: the
-counter still has to be the right key inside a server-owned window. This is a deliberate
-trade, and it belongs in the release notes rather than in a fix.
+**Fake telegraphs are advisory against a modified client.** `nextCue` ships in the same payload as `cue`, because the NUI has to draw the flip and a round trip at that moment would cost exactly the reaction time the mechanic tests. A modified client can read the real direction up front and ignore fakes. It gains immunity to a tier-3+ flourish, not free wins: the counter still has to be the right key inside a server-owned window.
+
+**Directional world feedback is not implemented.** Rod lean, bobber displacement and splash by fish direction are deferred to Phase G, as stated at the top of this plan. Phase B's fight reads through the panel, sound and the existing fishing animation only.
