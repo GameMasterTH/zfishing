@@ -206,6 +206,9 @@ function H.loadSession(opts)
         degrade = function() return { broke = {} } end,
         breakLine = function() calls.lineBroken = true end,
     }
+    -- session.lua's playerDropped handler calls into the boat anchor module, which the
+    -- encounter suites never exercise; stubbed so a disconnect test can run the handler.
+    BoatAnchor = { Add = function() end, Remove = function() end, OnDisconnect = function() end }
     dofile('shared/util.lua')
     dofile('shared/encounters.lua')
     dofile('server/encounter.lua')

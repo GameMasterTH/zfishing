@@ -13,6 +13,11 @@ local gate = ZUtil.MakeRateGate({
     hook   = { max = 5, window = 2000 },
     claim  = { max = 3, window = 3000 },
     anchor = { max = 5, window = 5000 },
+    -- Sized from counter-pull, the busiest encounter: a tier-5 fight is on the order of
+    -- 28 counters plus fatigue reels across ~31s, and MakeRateGate is a FIXED window,
+    -- so what matters is the busiest 10s slice, not the whole-fight average. Re-check
+    -- this number against the final tier table when counter-pull lands (Phase B).
+    encounter = { max = 40, window = 10000 },
 })
 
 local function reset(src) sessions[src] = nil end
@@ -42,6 +47,19 @@ local function sessionFor(src, sessionId)
     if not s or type(sessionId) ~= 'string' or s.id ~= sessionId then return nil end
     return s
 end
+
+-- server/encounter.lua never reads `sessions` directly: it resolves through the same
+-- token check every other transition uses, and shares this file's flood gate.
+--
+-- Called with a src (the action callback) it is the full token check. Called without
+-- one (the expiry timer, which outlives the request that armed it) it looks the session
+-- up by id and the caller re-checks object identity before touching anything.
+Encounter.Session = function(sessionId, src)
+    if src ~= nil then return sessionFor(src, sessionId) end
+    for _, s in pairs(sessions) do if s.id == sessionId then return s end end
+    return nil
+end
+Encounter.Gate = function(src) return gate.allow(src, 'encounter') end
 
 local function withinRate(src)
     local now = os.time()
@@ -250,7 +268,16 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
     end
     s.state = 'reeling'
     s.reelStart = GetGameTimer()
-    return { ok = true }
+    -- A legacy session mints no challenge: its fight runs client-side exactly as before.
+    local challengeId
+    if s.encounter and s.encounter.type ~= Encounters.FALLBACK then
+        challengeId = Encounter.Begin(s, {
+            lineRating = s.lineRating,
+            reelDrain  = s.reelDrain or 1.0,
+            greenZone  = (Config.Equipment.rods[s.rod] or {}).greenZone or 0.0,
+        })
+    end
+    return { ok = true, challengeId = challengeId }
 end)
 
 lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)
