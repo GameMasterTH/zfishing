@@ -155,6 +155,15 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
     })
     if not fish then return { ok = false, reason = 'empty_water' } end
 
+    -- Resolved ONCE, here, and frozen into the session below. Nothing downstream reads
+    -- Config.EncounterMode again for this session -- that is what lets an admin change
+    -- the mode without altering a fight already in progress.
+    local encType, encMode, encDowngraded = Encounter.ResolveForSession(fish)
+    if encDowngraded then
+        print(('[zfishing] encounter %s has no module deployed; using %s instead')
+            :format(encDowngraded, encType))
+    end
+
     -- float speeds up (or slows down) the wait for a bite
     if stats and stats.floatBiteSpeed and stats.floatBiteSpeed > 0 then
         fish.biteDelay = math.max(500, math.floor(fish.biteDelay / stats.floatBiteSpeed))
@@ -188,6 +197,8 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
         lineRating = stats and stats.lineRating or resolveLineRating(src, level),
         reelDrain = stats and stats.reelDrain or nil,
         rigSlot = rigSlot,
+        -- type and difficulty are frozen at cast; the challenge state is built at hook
+        encounter = { type = encType, mode = encMode, difficulty = fish.difficulty or 1 },
         castAt = GetGameTimer(), zone = zone.name,
     }
 
@@ -211,6 +222,10 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
             baseDrain = Config.Minigame.baseDrain,   -- authoritative; the server validates against it
             reelTimeout = Config.Timings.reelTimeout, -- single source of truth for the fight clock
             fishWeight = fish.weight,          -- actual rolled weight for NUI dynamics
+            -- which fight to render. NOT the mode: the client has no business knowing
+            -- the global selection policy, only which encounter it was handed.
+            encounter = s.encounter.type,
+            difficulty = s.encounter.difficulty,
         })
         -- if the player never presses hook, don't leave the session stuck
         SetTimeout(fish.hookWindow + Config.Timings.hookLatency + 2000, function()

@@ -138,6 +138,100 @@ function H.withRandom(v, fn)
     if not ok then error(err, 0) end
 end
 
+-- Minimal inventory-and-framework facade, matching the surface server/session.lua
+-- and server/rig.lua actually call.
+function H.makeZfishing(state)
+    state = state or {}
+    local inv = state.inv or {}
+    local Z = {}
+    function Z.Blocked() return state.blocked end
+    function Z.Enhanced() return state.mode ~= 'simple' end
+    function Z.Simple() return state.mode == 'simple' end
+    function Z.Identifier() return 'license:test' end
+    function Z.HasItem(src, item)
+        for _, s in pairs(inv[src] or {}) do if s.name == item then return true end end
+        return false
+    end
+    function Z.GetSlot(src, slot) return (inv[src] or {})[slot] end
+    function Z.AddItem() return true end
+    function Z.RemoveItem() return true end
+    function Z.RemoveItemSlot() return true end
+    function Z.SetMetadata() return true end
+    function Z.Notify() end
+    return Z
+end
+
+-- Boots server/session.lua against stubbed collaborators. Returns the recorded
+-- Rewards.GiveCatch calls so a test can assert what settlement was handed.
+function H.loadSession(opts)
+    opts = opts or {}
+    H.installHost()
+    Config = H.baseConfig()
+    Config.EncounterMode = opts.encounterMode or 'default'
+    Config.ForcedEncounter = opts.forcedEncounter or 'counter_pull'
+    Config.RequireZone = false
+    Config.Durability = false
+
+    -- opts.rig = true exercises the assembled-rod path, which is the only path that
+    -- populates session.rigSlot -- and rigSlot is what Rig.breakLine needs, so a snap
+    -- test has to run through it.
+    Config.RequireAssembly = opts.rig == true
+
+    local inv = { [5] = { [1] = { name = 'fishing_rod_common', count = 1 }, [2] = { name = 'worm', count = 5 } } }
+    Zfishing = H.makeZfishing({ mode = opts.rig and 'enhanced' or 'simple', inv = inv })
+    Progression = {
+        Get = function() return { level = 5, identifier = 'license:test' } end,
+        Load = function() return true end, AddXP = function() end, Save = function() end,
+    }
+    Generator = { Roll = function()
+        return H.deepcopy(opts.fish or { species = 'bass', label = 'Bass', weight = 2.0, quality = 3,
+            rarity = 'common', behavior = 'steady_light', biteDelay = 100, hookWindow = 1500,
+            tensionDiff = 1.0, fishEnergy = 50, xp = 10, price = 100, difficulty = 1 })
+    end }
+    local calls = { give = 0, ctx = nil }
+    Rewards = { GiveCatch = function(_, _, _, ctx)
+        calls.give = calls.give + 1
+        calls.ctx = ctx
+        return { ok = true, committed = true, warnings = {} }
+    end }
+    local META = { parts = { reel = 'reel_cheap', line = 'line_10', hook = 'hook_4', float = 'float_wood' },
+                   dur = { rod = 20, reel = 20, line = 20, hook = 20, float = 20 } }
+    Rig = {
+        slotMeta = function()
+            if not opts.rig then return nil end
+            return { name = 'fishing_rod_common' }, META
+        end,
+        isComplete = function() return opts.rig == true end,
+        stats = function() return { lineRating = 10, reelDrain = 1.0, hook = 'hook_4', floatBiteSpeed = 1.0 } end,
+        degrade = function() return { broke = {} } end,
+        breakLine = function() calls.lineBroken = true end,
+    }
+    dofile('shared/util.lua')
+    dofile('shared/encounters.lua')
+    dofile('server/encounter.lua')
+    dofile('server/session.lua')
+    return calls
+end
+
+-- Finds the most recent recorded client event by name.
+function H.lastClientEvent(name)
+    for i = #H.spy.clientEvents, 1, -1 do
+        if H.spy.clientEvents[i].event == name then return H.spy.clientEvents[i] end
+    end
+    return nil
+end
+
+-- Fires the most recently scheduled SetTimeout. Always the timer the call under test
+-- just armed -- indexing H.TIMERS[1] breaks the moment a test casts twice, because the
+-- first cast's bite timer is still sitting there and its identity guard makes firing it
+-- a silent no-op.
+function H.fireLatestTimer()
+    local t = H.TIMERS[#H.TIMERS]
+    assert(t, 'expected a scheduled timer')
+    t.fn()
+    return t
+end
+
 function H.run()
     local failures = 0
     for _, entry in ipairs(tests) do
