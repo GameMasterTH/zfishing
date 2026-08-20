@@ -482,21 +482,23 @@ has no business knowing the global mode.
 added to `config/fish.lua` survives `Store.Seed()` (which `json.encode`s the raw
 table) but is stripped the first time an admin saves that fish through the panel.
 
-The whitelist gains:
+`ValidateFish` returns a **table literal** — unlike `ValidateEquipment`, it has no
+`clean` local — so the field is validated before the return and carried into the
+literal:
 
 ```lua
-if data.encounter ~= nil then
-    if not Encounters.IDS[data.encounter] then return nil, 'unknown encounter' end
-    clean.encounter = data.encounter
-end
+    -- ... after the existing xp / water / baits validation, before the return:
+    if data.encounter ~= nil and not Encounters.IDS[data.encounter] then
+        return nil, 'unknown encounter'
+    end
+    return { label = data.label, water = water, weight = { min = wmin, max = wmax },
+             rarity = data.rarity, price = price, baits = baits,
+             behavior = data.behavior, xp = xp,
+             encounter = data.encounter }
 ```
 
 `nil` is valid and means "use the fallback". A present-but-unknown value is a hard
 validation error, not a silent drop.
-
-Note that `ValidateFish` returns a **table literal**, unlike `ValidateEquipment` which
-builds a `clean` local. The patch adds the field to that literal; it does not
-introduce the `clean` pattern here.
 
 ### 3.9.1 Getting the pilot mapping onto a server that has already booted
 
