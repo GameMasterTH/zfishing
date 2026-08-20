@@ -68,4 +68,92 @@ test('R5 LineMult is exact at the shipped ratings, monotone between them, and cl
     truthy(Encounters.LineMult(30) < Encounters.LineMult(40))
 end)
 
+-- ---------------------------------------------------------------- resolver
+
+local function loadResolver(mode, forced)
+    H.installHost()
+    Config = H.baseConfig()
+    if mode ~= nil then Config.EncounterMode = mode end
+    -- assigned unconditionally: passing nil must mean "no ForcedEncounter stored",
+    -- which is one of the cases R13 exists to cover
+    Config.ForcedEncounter = forced
+    dofile('shared/util.lua')
+    dofile('shared/encounters.lua')
+    dofile('server/encounter.lua')
+end
+
+local function fishWith(encounter)
+    return { species = 'bass', rarity = 'common', behavior = 'steady_light',
+             weight = 2.0, encounter = encounter }
+end
+
+test('R6 DEFAULT resolves an explicitly configured fish encounter', function()
+    loadResolver('default')
+    local id, mode = Encounter.Resolve(fishWith('sonar_strike'))
+    equal(id, 'sonar_strike')
+    equal(mode, 'default')
+end)
+
+test('R7 DEFAULT falls back to legacy when the fish has no encounter', function()
+    loadResolver('default')
+    equal((Encounter.Resolve(fishWith(nil))), 'legacy_tension')
+end)
+
+test('R8 DEFAULT falls back to legacy on an unregistered fish encounter', function()
+    loadResolver('default')
+    equal((Encounter.Resolve(fishWith('boss_fight'))), 'legacy_tension',
+        'a future id that is not registered yet must not reach a session')
+    equal((Encounter.Resolve(fishWith(42))), 'legacy_tension', 'a non-string must not reach a session')
+end)
+
+test('R9 RANDOM only ever returns a pool member and never legacy', function()
+    loadResolver('random')
+    for _ = 1, 300 do
+        local id, mode = Encounter.Resolve(fishWith(nil))
+        truthy(Encounters.FORCEABLE[id], 'random returned an id outside the pool: ' .. tostring(id))
+        falsy(id == 'legacy_tension', 'legacy must never come out of the random pool')
+        equal(mode, 'random')
+    end
+end)
+
+test('R10 RANDOM can reach every pool entry', function()
+    loadResolver('random')
+    -- ZUtil.weightedPick is the only no-argument math.random caller here; pinning it
+    -- walks the three pool branches deterministically instead of hoping 300 draws
+    -- happened to cover them.
+    H.withRandom(0.1, function() equal((Encounter.Resolve(fishWith(nil))), 'counter_pull') end)
+    H.withRandom(0.5, function() equal((Encounter.Resolve(fishWith(nil))), 'fish_mindgame') end)
+    H.withRandom(0.9, function() equal((Encounter.Resolve(fishWith(nil))), 'sonar_strike') end)
+end)
+
+test('R11 FORCED returns the configured encounter for every fish', function()
+    for _, forced in ipairs({ 'counter_pull', 'fish_mindgame', 'sonar_strike' }) do
+        loadResolver('forced', forced)
+        equal((Encounter.Resolve(fishWith(nil))), forced, 'unconfigured fish must still be forced')
+        equal((Encounter.Resolve(fishWith('counter_pull'))), forced,
+            'FORCED must override a fish that configured something else')
+        local _, mode = Encounter.Resolve(fishWith(nil))
+        equal(mode, 'forced')
+    end
+end)
+
+test('R12 an invalid EncounterMode falls back to default behaviour', function()
+    loadResolver('chaos')
+    local id, mode = Encounter.Resolve(fishWith('sonar_strike'))
+    equal(mode, 'default', 'an unusable stored mode must degrade to default, not error')
+    equal(id, 'sonar_strike', 'and default behaviour still honours the fish')
+    loadResolver(false)
+    equal((select(2, Encounter.Resolve(fishWith(nil)))), 'default')
+end)
+
+test('R13 an invalid ForcedEncounter falls back to legacy, not to a random pick', function()
+    loadResolver('forced', 'boss_fight')
+    equal((Encounter.Resolve(fishWith(nil))), 'legacy_tension')
+    loadResolver('forced', 'legacy_tension')
+    equal((Encounter.Resolve(fishWith(nil))), 'legacy_tension',
+        'legacy is not forceable, so forcing it lands on the fallback by the same route')
+    loadResolver('forced', nil)
+    equal((Encounter.Resolve(fishWith(nil))), 'legacy_tension')
+end)
+
 H.run()

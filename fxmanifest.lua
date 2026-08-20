@@ -30,6 +30,7 @@ server_scripts {
     'server/weather.lua',
     'server/progression.lua',
     'server/generator.lua',
+    'server/encounter.lua',
     'server/rewards.lua',
     'server/admin.lua',
     'server/rig.lua',
