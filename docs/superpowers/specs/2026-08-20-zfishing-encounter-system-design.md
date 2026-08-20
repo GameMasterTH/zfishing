@@ -187,13 +187,33 @@ Gear enters each encounter as separate, named knobs:
 
 | gear stat | source | effect inside an encounter |
 | --- | --- | --- |
-| `lineRating` | `Config.Equipment.lines[*].rating` | size of the line-health pool |
-| `reelDrain` | `Config.Equipment.reels[*].drainRate` | stamina removed per successful action |
+| `lineRating` | `Config.Equipment.lines[*].rating` | size of the line-health pool, via the lookup below |
+| `reelDrain` | `Config.Equipment.reels[*].drainRate` | stamina removed per successful action — **counter-pull only**, see section 5.3 |
 | `greenZone` | `Config.Equipment.rods[*].greenZone` | widens counter window / decision time / weak spot by `1 + greenZone` |
 | float tier | `Config.Equipment.floats` | **sonar readability in the NUI only** — never changes a server-side hit window |
 
 The float rule is what keeps Sonar Strike playable without a Smart Float: better
 floats draw a clearer picture, they do not make the target bigger.
+
+**A raw equipment stat is never used directly as a multiplier.** Line ratings are
+10 / 20 / 40 / 60, so a naive `lineRating / 10` yields 1x / 2x / 4x / 6x. At tier 5
+that turns a base pool of 80 into 480 for a 60lb line — but tier 5 also has
+`maxMisses = 4` and `mistakeDamage = 30`, so four mistakes deal 120 damage and the
+fish escapes on the miss count long before the line is anywhere near breaking. Every
+upgrade past 20lb would buy nothing an encounter could ever express.
+
+Line health therefore uses an explicit, encounter-facing curve in the registry:
+
+| line | rating | pool multiplier |
+| --- | --- | --- |
+| `line_10` | 10 | 1.00x |
+| `line_20` | 20 | 1.15x |
+| `line_40` | 40 | 1.30x |
+| `line_60` | 60 | 1.45x |
+
+The implementation plan must check this curve against `mistakeDamage` and `maxMisses`
+per tier and confirm that both failure conditions stay reachable — a line upgrade
+should change *which* failure you are racing, not retire one of them.
 
 ### 3.3 `server/encounter.lua` — the one resolver
 
@@ -259,10 +279,17 @@ never be replayed into another: the request is rejected twice over, once by
 `sessionFor(src, sessionId)` and once by the `challengeId` comparison.
 
 **The deadline is derived, not a constant.** Each encounter module reports the
-worst-case honest fight length for its tier — for counter-pull,
-`counters * (telegraph + counterWindow)` plus its fatigue windows; for mindgame,
-`turns * decisionTime`; for sonar, `passes * passDuration` — and the deadline is that
-estimate with headroom:
+worst-case honest fight length for its tier. Each estimate must count the **longest
+survivable** run, not the flawless one — a fight that ends in a win after several
+mistakes is the case that has to fit:
+
+| encounter | estimate |
+| --- | --- |
+| `counter_pull` | `(counters + maxMisses) * (telegraph + counterWindow)` plus its fatigue windows |
+| `fish_mindgame` | `(turns + escapeThreshold + 1) * decisionTime` — wrong answers return stamina, so they add turns; the `+1` is the forced landing turn |
+| `sonar_strike` | `(requiredHits + maxMisses - 1) * passDuration` — the maximum attempts of section 6.4, not `requiredHits` |
+
+The deadline is that estimate with headroom:
 
 ```lua
 deadline = ZUtil.clamp(estimatedFightMs * 1.75, 15000, 120000)
@@ -322,6 +349,41 @@ reply can resynchronise rather than desynchronise:
 ```lua
 { ok = true, seq = s.encounter.seq, state = <render payload>, outcome = <nil or terminal> }
 ```
+
+#### The no-input problem, and the `advance` action
+
+Lazy deadline evaluation has a hole: **if the player never acts, no action arrives, so
+nothing evaluates the deadline.** A counter-pull phase whose window closed sits in
+`LEFT_RUN` forever. A mindgame turn whose decision deadline passed is specced as "a
+missed deadline is scored as a wrong answer", but there is no request that would
+execute that transition. A sonar attempt with no strike is specced as a MISS, but
+nothing produces the MISS. In every case the encounter stalls until overall expiry and
+resolves as `timeout` — which is the wrong outcome, and takes far too long to reach it.
+
+The fix costs no server tick. The NUI sends a **neutral `advance` action** when its
+own local deadline passes, and the server validates that the deadline really has:
+
+```lua
+if action == 'advance' then
+    if GetGameTimer() < phase.deadline then return { ok = false, reason = 'bad_action' } end
+    -- the SERVER decides what an expired deadline means:
+    --   counter_pull   -> miss
+    --   fish_mindgame  -> wrong answer
+    --   sonar_strike   -> missed attempt
+end
+```
+
+The client cannot use this to go faster: an early `advance` is rejected, so each one
+costs real elapsed time. It cannot use it to go slower in any useful way either — a
+late `advance` only delays a transition the player already lost, and the overall
+expiry backstops a client that stops sending them entirely.
+
+`advance` is deliberately **not** called `timeout`: `timeout` is a terminal encounter
+outcome (section 3.7), and reusing the word for a per-turn transition would make log
+lines and test names ambiguous.
+
+`advance` consumes a `seq` like any other action, so it is covered by the same replay
+and ordering guarantees, and it counts against the flood gate.
 
 **Flood gate.** One new entry in the existing table at `server/session.lua:11`:
 
@@ -385,14 +447,25 @@ for a flawless sonar fight than a flawless counter-pull — and under RANDOM the
 encounter is pure luck, so identical skill would earn different XP for no reason the
 player can see or influence.
 
-| encounter | score |
-| --- | --- |
-| `counter_pull` | `1 - misses / maxMisses` |
-| `fish_mindgame` | `correctAnswers / totalTurnsTaken` |
-| `sonar_strike` | `perfectStrikes / requiredPasses` |
+All three take the same shape — **the average quality of the actions you actually
+took** — so the numbers are comparable across encounters rather than merely all
+topping out at 1.0:
 
-Each is clamped to 0..1. Each reaches 1.0 on a flawless fight and 0 on the worst
-survivable one.
+| encounter | score | action values |
+| --- | --- | --- |
+| `counter_pull` | `sum(actionValues) / attempts` | correct counter 1.0, miss 0 |
+| `fish_mindgame` | `sum(actionValues) / turnsTaken` | correct answer 1.0, wrong 0 |
+| `sonar_strike` | `sum(actionValues) / attempts` | PERFECT 1.0, SAFE 0.7, MISS 0 |
+
+Each is clamped to 0..1 and reaches exactly 1.0 on a flawless fight.
+
+Two earlier formulas were dropped for reasons worth recording. `1 - misses/maxMisses`
+for counter-pull could never reach 0 on a *successful* catch, because reaching
+`maxMisses` ends the fight as an escape — so the documented range was wrong.
+`perfectStrikes / requiredHits` for sonar was too coarse to be useful: a tier-1 fight
+with two required hits could only ever score 0, 0.5 or 1.0, and a tier-2 fight only
+0, 0.33, 0.67 or 1.0. Giving SAFE partial credit and dividing by attempts smooths both
+and makes a sonar score mean the same kind of thing a mindgame score does.
 
 It is passed to settlement in the existing context table
 (`Rewards.GiveCatch(src, fish, zone, { sessionId, identifier, perfScore })`) and
@@ -637,8 +710,10 @@ would fail honest players, which PART 12 explicitly warns against.
 | 4 | 520ms | 850ms | 4 | 3 | 180 | 85 | 28 | 4 | 0.18 |
 | 5 | 420ms | 700ms | 5 | 3 | 220 | 80 | 30 | 4 | 0.25 |
 
-`counterWindow` is multiplied by `1 + rodGreenZone`. `line` is scaled by
-`lineRating / 10`. `reelMult` is the reel's `drainRate`.
+`counterWindow` is multiplied by `1 + rodGreenZone`. `line` is scaled by the line
+curve of section 3.2, not by `lineRating / 10`. `reelMult` is the reel's `drainRate`
+— counter-pull is the one encounter where it multiplies stamina damage (section 5.3
+explains why the mindgame does not).
 
 Two independent failure clocks run in parallel and that is intentional: `line`
 punishes *how badly* you were wrong (mistake damage), `maxMisses` punishes *how often*.
@@ -648,11 +723,19 @@ A player on heavy line survives more mistakes but not more of them.
 
 Only at tier 3 and above, at `fakeChance`.
 
-The server decides the fake **when it builds the phase** and sends `cue = X`,
-`switchAt`, and a `required` derived from the real direction `Y`. `switchAt` is
-constrained to be **at least 400ms before `windowClosesAt`**, so the NUI always has
+The server decides the fake **when it builds the phase**, keeps the resulting
+`required` counter entirely to itself, and sends the NUI only what it needs to draw:
+`displayCue = X`, `switchAt`, `nextDisplayCue = Y`, and the window times. `switchAt`
+is constrained to be **at least 400ms before `windowClosesAt`**, so the NUI always has
 time to render a visible flip. There is no unavoidable RNG failure: a player watching
 the cue can always react to the switch.
+
+**Render data is not resolution data.** No encounter payload carries the required
+answer. A player can derive the counter from the cue — that is the game — but a
+payload field spelling out `required = counter_right` hands an auto-counter bot the
+answer without it having to interpret anything, and buys an honest client nothing. The
+same rule applies to the mindgame telegraph (section 5.4) and to the sonar weak-spot
+band, which the NUI reconstructs from the pass record rather than being told about.
 
 ### 4.5 State selection by behavior
 
@@ -694,7 +777,7 @@ Player responses: `GIVE_LINE`, `BRACE`, `HOLD`, `REEL`.
 | `DIVE` | `BRACE` | stamina -- | line --- |
 | `THRASH` | `HOLD` | stamina -- | escapePressure + |
 | `JUMP` | `GIVE_LINE` | stamina -- | escapePressure ++ |
-| `REST` | `REEL` | landing progress ++ | turn wasted, stamina + |
+| `REST` | `REEL` | stamina -- -- (double value) | turn wasted, stamina + |
 
 `RUN` and `JUMP` share a correct response on purpose. They differ in the **cost of
 being wrong**, not in the answer. This keeps the table readable while stopping the
@@ -727,10 +810,26 @@ Turn counts sit inside the brief's targets (common 3-5, uncommon/rare 5-7,
 epic/legendary 6-10). Decision time is multiplied by `1 + rodGreenZone`.
 
 **`turns` is what makes the tier real.** Stamina starts at 100 and each correct
-response removes `100 / turns` (times the reel's `drainRate`), so a flawless fight
-lands the fish in exactly `turns` correct answers. A wrong answer returns
-`50 / turns` stamina, which is why mistakes lengthen a fight rather than only
-damaging it.
+response removes `100 / turns`, so a flawless fight lands the fish in exactly `turns`
+correct answers. A wrong answer returns `50 / turns` stamina, which is why mistakes
+lengthen a fight rather than only damaging it.
+
+**The reel's `drainRate` deliberately does not multiply that damage.** It would break
+the sentence above: with an Electric Reel (`drainRate = 1.7`) a tier-5 fight would
+land in about 6 correct answers instead of 9, and a tier-1 fight in 2 instead of 3.
+The number of reads *is* this encounter's content, so letting gear delete a third of
+them removes gameplay rather than rewarding investment — and it would make the tier
+figure in the table untrue.
+
+Reel quality helps the mindgame in ways that do not shorten it:
+
+- a wrong answer returns less stamina (a better reel holds ground under a mistake)
+- the `REST` -> `REEL` play converts into more stamina damage
+- the landing turn below is more forgiving
+
+Counter-pull is the opposite case and keeps its `drainRate` multiplier on stamina:
+it is a continuous fight, not a fixed number of decisions, and its tier is carried by
+telegraph and window timings rather than by a turn count.
 
 Escape pressure accrues only on the two actions where a wrong answer risks the hook:
 a wrong `THRASH` answer adds 1, a wrong `JUMP` answer adds 2. Reaching the tier's
@@ -738,15 +837,30 @@ threshold ends the fight as `escape`.
 
 ### 5.4 Fake telegraphs
 
-Tier 4-5 only. The server sends `cue`, `switchAt` and the real action; `switchAt` is
+Tier 4-5 only. The server sends `displayCue`, `switchAt` and `nextDisplayCue` — never
+the correct response, per the render-vs-resolution rule in section 4.4. `switchAt` is
 constrained to be **at least 700ms before the decision deadline** — more headroom than
 counter-pull because a mindgame response is a considered choice, not a reflex.
 
 ### 5.5 Outcomes
 
 `line <= 0` -> `snap`. `escapePressure >= threshold` -> `escape`. A missed decision
-deadline is scored as a wrong answer, not as a separate failure. `now > expiresAt` ->
-`timeout`. Stamina at zero with landing progress complete -> `success`.
+deadline is scored as a wrong answer, not as a separate failure — the `advance` action
+of section 3.5 is what makes the server execute that transition. `now > expiresAt` ->
+`timeout`.
+
+**Landing is a forced turn, not a second resource.** When stamina reaches zero the
+server overrides the behavior chain and issues a `LANDING` turn: one `REEL` inside one
+decision window ends the fight as `success`; missing it returns the fish to stamina 25
+and the chain resumes.
+
+This exists because the Markov chain gives no guarantee about `REST`. A tier-5 fish
+could legitimately roll RUN / DIVE / THRASH / RUN / DIVE / JUMP / RUN / DIVE / THRASH
+and never rest once — under a design where landing required a separate progress
+counter fed only by `REST`, that fish would be unwinnable through no fault of the
+player. Forcing the landing turn makes an unwinnable state unreachable by RNG, and it
+mirrors counter-pull's `LANDING` state (section 4.2), so both encounters end the same
+way.
 
 ### 5.6 Presentation and accessibility
 
@@ -764,7 +878,11 @@ a green bar.
 
 ### 6.1 The pass record
 
-The server generates every pass up front from the challenge seed:
+The server generates the full set of attempts up front from the challenge seed — the
+count is bounded at `requiredHits + maxMisses - 1` (section 6.4), so pre-generating
+them all is finite, and it keeps the timeline deterministic from the seed alone, which
+is what the cross-language parity fixture of section 9.3 depends on. Attempts past the
+terminating one are simply never used.
 
 ```lua
 pass = {
@@ -792,48 +910,98 @@ fixture guarantees the two agree (section 9.3).
 
 ### 6.3 Strike evaluation
 
-The client sends `{ passIndex, atMs }`, where `atMs` is measured from the `startAt`
-the server itself supplied.
+**The client does not tell the server when it struck. It tells the server *that* it
+struck, and the server decides when that was.**
+
+An earlier draft of this design had the client send `atMs` (its own elapsed time into
+the pass) and the server accept it if `now - (startAt + atMs)` fell inside
+`[-100ms, +1200ms]`. That is not server authority, it is a retrospective selection
+window. A modified client knows the canonical timeline — it has to, in order to draw
+it — so it can wait until `now = startAt + 2400`, then submit `atMs = 1840` because
+1840 is the perfect centre. The arrival check passes (`2400 - 1840 = 560ms`) even
+though the player struck at no such moment. The wider the latency allowance, the
+bigger the cheat.
+
+The strike payload is therefore:
+
+```
+{ challengeId, seq, passIndex, action = 'strike' }
+```
+
+and the server derives the moment itself:
+
+```lua
+local receivedAt   = GetGameTimer()
+local ping         = GetPlayerPing(src)
+local compensation = ZUtil.clamp(ping * 0.5, 0, MAX_COMPENSATION)   -- MAX_COMPENSATION = 200ms
+local strikeAt     = receivedAt - compensation
+local t            = strikeAt - pass.startAt
+```
 
 ```
 1. passIndex must equal the current pass          -> stale_pass
-2. atMs must be within [0, duration]              -> bad_action
-3. arrival plausibility:
-       now - (startAt + atMs)  must be in [-100ms, +1200ms]
-4. d = |posAt(atMs) - weakCenter(atMs)|
-       d <= perfectHalf  -> PERFECT   (one pass of progress, perf++)
-       d <= weakHalf     -> SAFE      (one pass of progress)
-       otherwise         -> MISS      (line damage, pass consumed, misses++)
-5. no strike before the pass ends                 -> MISS
+2. t must fall within [0, duration]               -> MISS (struck outside the pass)
+3. d = |posAt(t) - weakCenter(t)|
+       d <= perfectHalf  -> PERFECT   (one hit, perfect++)
+       d <= weakHalf     -> SAFE      (one hit)
+       otherwise         -> MISS      (line damage, misses++)
+4. the pass ends with no strike                   -> MISS (via the `advance` action, section 3.5)
 ```
 
-**SAFE and PERFECT advance the encounter by exactly the same amount — one pass.**
-PERFECT buys nothing but the `perf` counter, which feeds the XP bonus of section
-3.6.1. Letting a perfect strike also shorten the fight would make the required pass
-count vary with player skill, which would quietly break the tier-preservation
-invariant that sections 3.2, 9.1/13 and 9.1/14 exist to protect.
+A client may send a `clientAtMs` alongside the strike. It is recorded for telemetry
+and debug logging and **must not appear in any expression that decides a hit, a
+grade, or a reward.**
 
-Step 3 is what defeats a fabricated perfect. A modified client can trivially compute
-the `atMs` that lands dead centre, but it cannot also make the packet arrive at a
-plausible wall-clock moment for that `atMs`. The window is deliberately wide
-(`+1200ms`) so real latency and frame quantisation never punish an honest player; the
-negative bound (`-100ms`) rejects a strike claimed for a moment that has not happened
-yet.
+What a modified client can still do is *delay* — arrive later than a human would. That
+moves `strikeAt` forward in real time only; it can never move it backward, so there is
+no way to select a favourable past moment. Delaying is exactly the power an honest
+laggy player has, and it makes strikes worse, not better.
+
+**SAFE and PERFECT advance the encounter by exactly the same amount — one hit.**
+PERFECT buys nothing but score, which feeds the XP bonus of section 3.6.1. Letting a
+perfect strike also shorten the fight would make the required hit count vary with
+player skill and quietly break the tier-preservation invariant that sections 3.2 and
+9.1 items 13-14 exist to protect.
 
 Because the timeline comes from the server, **client frame rate cannot alter it**. A
-30fps and a 240fps client evaluate against the same `posAt`.
+30fps and a 240fps client are evaluated against the same `posAt`.
 
 ### 6.4 Tier parameters
 
-| tier | passes | pass duration | weakHalf | perfectHalf | maxMiss |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 2 | 4000ms | 0.18 | 0.07 | 3 |
-| 2 | 3 | 3600ms | 0.15 | 0.06 | 3 |
-| 3 | 3 | 3200ms | 0.12 | 0.05 | 2 |
-| 4 | 4 | 2800ms | 0.10 | 0.04 | 2 |
-| 5 | 5 | 2400ms | 0.08 | 0.03 | 2 |
+`passes` is renamed `requiredHits`, because a missed attempt used to consume a pass
+without producing a hit and the two counts are not the same thing. With
+`requiredHits = 3, maxMisses = 2`, the sequence MISS / PERFECT / PERFECT left the
+encounter with two hits, no passes remaining, and neither a success nor an escape
+condition met — an undefined state.
+
+The server generates a new attempt until one of two things is true:
+
+```
+hits   >= requiredHits  -> success
+misses >= maxMisses     -> escape
+```
+
+so the longest possible successful fight is `requiredHits + maxMisses - 1` attempts.
+The deadline estimate of section 3.4 must use **that** number, not `requiredHits`.
+
+| tier | requiredHits | maxMisses | max attempts | pass duration | weakHalf | perfectHalf |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2 | 3 | 4 | 4000ms | 0.18 | 0.07 |
+| 2 | 3 | 3 | 5 | 3600ms | 0.15 | 0.06 |
+| 3 | 3 | 2 | 4 | 3200ms | 0.12 | 0.05 |
+| 4 | 4 | 2 | 5 | 2800ms | 0.10 | 0.04 |
+| 5 | 5 | 2 | 6 | 2400ms | 0.08 | 0.03 |
 
 Widths are normalized to the lane. `weakHalf` is multiplied by `1 + rodGreenZone`.
+
+**These widths must be re-derived in milliseconds before implementation.** Server-side
+lag compensation is approximate, so the real question is how much timing error a band
+tolerates. At tier 5 a linear pass crosses the lane in 2400ms, so `perfectHalf = 0.03`
+is a **±72ms** window — tighter than the compensation error budget, which would make
+PERFECT partly a lottery on connection quality. The implementation plan must convert
+every width to milliseconds of travel, compare against a stated error budget, and
+widen the tight tiers as needed. The normalized figures above are a starting point,
+not a tuned table.
 
 ### 6.5 Equipment
 
@@ -844,8 +1012,8 @@ picture easier to read, not the target easier to hit.
 
 ### 6.6 Outcomes
 
-`misses > maxMiss` -> `escape`. `line <= 0` -> `snap`. `now > expiresAt` ->
-`timeout`. Required passes completed -> `success`.
+`misses >= maxMisses` -> `escape`. `line <= 0` -> `snap`. `now > expiresAt` ->
+`timeout`. `hits >= requiredHits` -> `success`.
 
 ### 6.7 Presentation and accessibility
 
@@ -872,6 +1040,12 @@ differ.
 | tuna | run_stop | rare | 15-80 | 3-4 | `legacy_tension` | *recommended: counter_pull* |
 | shark | erratic | epic | 80-400 | 4-5 | `legacy_tension` | *recommended: sonar_strike* |
 | golden | erratic | legendary | 0.5-2 | 5 | `legacy_tension` | *recommended: sonar_strike* |
+
+The seven non-pilot fish ship with **no `encounter` key at all** — "unconfigured",
+which the resolver turns into `legacy_tension`. They are deliberately not given an
+explicit `encounter = 'legacy_tension'`: that value is reserved for an operator's
+choice, and writing it here would take the backfill of section 3.9.1 off the table for
+those fish when they are eventually promoted.
 
 ---
 
@@ -903,9 +1077,46 @@ A small `Segmented` control (~20 lines) is added to `web/src/admin/ui.tsx`, reus
 the existing `Btn` styling. The forced selector is **disabled**, not hidden, so the
 current forced value stays visible while in another mode.
 
-`web/src/admin/FishTab.tsx` gains a per-fish `encounter` dropdown: the three encounter
-ids plus an explicit "— (legacy)" option for `nil`, with the
-`Encounters.RECOMMENDED[behavior]` value shown as a hint.
+`web/src/admin/FishTab.tsx` gains a per-fish `encounter` dropdown with **four explicit
+values and no null option**:
+
+```
+Counter-Pull Fight  -> counter_pull
+Fish Mindgame       -> fish_mindgame
+Sonar Strike        -> sonar_strike
+Legacy Tension      -> legacy_tension
+```
+
+An admin save always writes one of those four. This is not cosmetic — an earlier draft
+offered a "— (legacy)" option that wrote `nil`, which contradicts section 3.9.1: the
+fish backfill fills keys a row lacks, so a `nil` rollback would be silently undone by
+the pilot value on the next boot. With the null option gone, the two states mean
+exactly one thing each:
+
+| value | meaning |
+| --- | --- |
+| absent | never explicitly configured — the backfill may populate it |
+| `legacy_tension` | an operator chose the legacy fight — the backfill leaves it alone |
+
+The `Encounters.RECOMMENDED[behavior]` value is shown next to the dropdown as a hint.
+
+**How the registry reaches the UI.** The registry is Lua and the admin panel is
+TypeScript, so without a stated transport the obvious thing to write is a second copy
+of the tables in TS — which will drift from the Lua one the first time an encounter is
+added. `zfishing:admin:getConfig` therefore returns the registry itself:
+
+```lua
+encounters = {
+    modes       = Encounters.MODES,
+    forceable   = Encounters.FORCEABLE,
+    recommended = Encounters.RECOMMENDED,
+},
+```
+
+This lives in the **admin** payload only. `clientPayload()` (`server/store.lua:125`)
+still carries none of it, for the same reason it carries neither setting: it
+broadcasts to every player. `shared/encounters.lua` stays the single source of truth,
+and the admin UI holds no hardcoded encounter list.
 
 ### 8.2 Authorization
 
@@ -954,6 +1165,19 @@ Resolver suite (PART 25), explicitly:
 Items 13 and 14 are asserted by rolling the same fish under all three modes and
 comparing `encounter.difficulty` for equality.
 
+Beyond the brief's checklist, each mechanism added during design review carries its
+own assertions. These are the ones most likely to regress silently:
+
+| mechanism | assertions |
+| --- | --- |
+| `advance` (3.5) | an `advance` sent before the deadline is rejected as `bad_action` and changes no state; one sent after the deadline produces a miss in counter-pull, a wrong answer in mindgame, a missed attempt in sonar; spamming `advance` cannot outrun real elapsed time |
+| server-derived strike time (6.3) | a `clientAtMs` in the payload does not appear in the hit decision — two strikes with identical arrival times and wildly different `clientAtMs` grade identically; a strike delayed past the pass grades as a miss; latency compensation is bounded by `MAX_COMPENSATION` |
+| sonar termination (6.4) | MISS / HIT / HIT with `requiredHits = 3, maxMisses = 2` continues to a fourth attempt rather than reaching an undefined state; success at `hits >= requiredHits`; escape at `misses >= maxMisses`; attempts never exceed `requiredHits + maxMisses - 1` |
+| forced landing (5.5) | a behavior chain that never emits `REST` is still winnable; stamina reaching zero issues the `LANDING` turn; a missed landing returns the fish to stamina 25 and the fight continues |
+| `perfScore` (3.6.1) | a flawless fight returns exactly 1.0 in all three encounters; a mixed sonar run scores between its SAFE and PERFECT bounds |
+| mindgame turn count (5.3) | the reel's `drainRate` does not change the number of correct answers needed — a tier-5 fight is 9 either way |
+| fish backfill (3.9.1) | a DB row with no `encounter` receives the static value on load; a row explicitly set to `legacy_tension` is left untouched across a reload |
+
 **Harness gap to fix:** `tests/package.json` has scripts only for the two water
 suites — `security.test.lua` has none. Add a script per suite plus a `test:all` that
 runs every Lua suite and reports a combined result.
@@ -967,8 +1191,9 @@ snapshots.
 | --- | --- |
 | `CounterPull` | direction cue renders per state; fatigue state changes the prompt; correct/incorrect input feedback; success and failure end states |
 | `FishMindgame` | telegraph renders; response buttons enabled per state; turn advances on server reply; result rendering |
-| `SonarStrike` | pass renders from the timeline; strike dispatches with the right `atMs`; hit/miss result; next pass begins |
-| `SettingsTab` | three modes selectable; forced selector disabled outside FORCED; current active configuration displayed |
+| `SonarStrike` | attempt renders from the pass record; a strike dispatches `action: 'strike'` and **no timing field the server would trust**; hit/miss/perfect result rendering; the next attempt begins |
+| `SettingsTab` | three modes selectable; forced selector disabled outside FORCED; current active configuration displayed; options come from the `encounters` payload rather than a hardcoded list |
+| `FishTab` | the encounter dropdown offers four values and never writes `null` |
 
 ### 9.3 Cross-language parity
 
