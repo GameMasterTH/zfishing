@@ -117,8 +117,17 @@ function Rewards.GiveCatch(src, fish, zoneName, ctx)
     -- replacement occupant if the src changed hands during the AddItem above.
     -- (SaveAwait's WHERE clause is safe on its own -- it captures c.identifier
     -- before the MySQL yield -- but the cache mutation in AddXP is not.)
+    -- Encounter performance is worth at most +25% XP, and it is the ONLY reward this
+    -- touches: weight, quality, Rewards.Price and the rare-loot roll are all exactly
+    -- where they were, so shipping encounters carries no economy delta. A legacy
+    -- session passes no perfScore and grants precisely what it granted before.
+    --
+    -- Computed outside the stage closure on purpose: runPlayerStage swallows a raise
+    -- into a structured warning, so a nil-arithmetic bug in here would surface as a
+    -- failed XP save rather than as itself.
+    local xp = math.floor(fish.xp * (1 + 0.25 * (type(ctx) == 'table' and ctx.perfScore or 0)))
     runPlayerStage(src, expected, warnings, 'xp_save_failed', function()
-        Progression.AddXP(src, fish.xp)
+        Progression.AddXP(src, xp)
         return Progression.SaveAwait(src)
     end)
 

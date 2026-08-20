@@ -78,6 +78,9 @@ local CLAIM_ERRORS = {
     settle_failed     = 'error_settle_failed',
     too_many_requests = 'error_too_many_requests',
     invalid_session   = 'error_invalid_session',
+    encounter_active  = 'error_encounter_active',
+    stale_challenge   = 'error_stale_challenge',
+    bad_seq           = 'error_bad_seq',
 }
 
 RegisterNUICallback('reelResult', function(body, cb)

@@ -287,32 +287,51 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     if s.state ~= 'reeling' then return { ok = false } end
     local fish = s.fish
 
-    -- Minimum plausible reel time. The NUI drains baseDrain * drainRate energy
-    -- per second while in the green zone, so a real catch can never finish
-    -- faster than this. drainRate defaults to 1.0 to match exactly what the bite
-    -- payload told the client -- assuming a faster reel here would hand every
-    -- non-assembly player a 1.7x discount on the floor.
-    local drain = s.reelDrain or 1.0
-    local minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000
-    local elapsed = GetGameTimer() - s.reelStart
-    -- 0.9 rather than a tighter value only to absorb frame quantisation: minMs
-    -- assumes a perfect green-zone hold for the whole fight, and network latency
-    -- only ever increases the elapsed time the server measures.
-    if success and elapsed < minMs * 0.9 then
-        reset(src); return { ok = false, reason = 'too_fast' }
-    end
-    if elapsed > Config.Timings.reelTimeout + 5000 then
-        reset(src); return { ok = false, reason = 'timeout' }
+    local encounter = (s.encounter and s.encounter.type ~= Encounters.FALLBACK) and s.encounter or nil
+
+    if encounter then
+        -- The server counted every action itself, so there is nothing left to take on
+        -- trust. `success` and `reason` arrived from the client and are discarded --
+        -- the plausibility floor in the else branch exists only because the LEGACY
+        -- fight runs entirely client-side.
+        if not encounter.outcome then return { ok = false, reason = 'encounter_active' } end
+        success = (encounter.outcome == 'success')
+        reason  = success and nil or encounter.outcome
+        -- The encounter's own deadline, not Config.Timings.reelTimeout: a turn-based
+        -- tier-5 fight legitimately runs longer than the legacy reel clock allows.
+        if GetGameTimer() > encounter.expiresAt + 5000 then
+            reset(src); return { ok = false, reason = 'timeout' }
+        end
+    else
+        -- Minimum plausible reel time. The NUI drains baseDrain * drainRate energy
+        -- per second while in the green zone, so a real catch can never finish
+        -- faster than this. drainRate defaults to 1.0 to match exactly what the bite
+        -- payload told the client -- assuming a faster reel here would hand every
+        -- non-assembly player a 1.7x discount on the floor.
+        local drain = s.reelDrain or 1.0
+        local minMs = (fish.fishEnergy / (Config.Minigame.baseDrain * drain)) * 1000
+        local elapsed = GetGameTimer() - s.reelStart
+        -- 0.9 rather than a tighter value only to absorb frame quantisation: minMs
+        -- assumes a perfect green-zone hold for the whole fight, and network latency
+        -- only ever increases the elapsed time the server measures.
+        if success and elapsed < minMs * 0.9 then
+            reset(src); return { ok = false, reason = 'too_fast' }
+        end
+        if elapsed > Config.Timings.reelTimeout + 5000 then
+            reset(src); return { ok = false, reason = 'timeout' }
+        end
     end
 
     if not success then
         -- fish escaped / line broke: legit outcome, bait already consumed.
-        -- a snapped line destroys the fitted line component for real.
+        -- a snapped line destroys the fitted line component for real. For an encounter
+        -- session `reason` is the SERVER's outcome, assigned above -- the client no
+        -- longer has any say in whether the line component is destroyed.
         if reason == 'snap' and s.rigSlot then
             Rig.breakLine(src, s.rigSlot)
             TriggerClientEvent('zfishing:rig:notify', src, 'line_broke')
         end
-        reset(src); return { ok = true, fish = nil }
+        reset(src); return { ok = true, fish = nil, outcome = reason }
     end
 
     -- Lock the session BEFORE the first yield. GiveCatch does AddItem +
@@ -326,7 +345,8 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     -- session: without it an error would park sessions[src] in 'settling' with
     -- nothing able to clear it and leave the player on `busy` until they reconnect.
     local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone,
-        { sessionId = s.id, identifier = s.identifier })
+        { sessionId = s.id, identifier = s.identifier,
+          perfScore = encounter and Encounter.PerfScore(encounter) or nil })
     local committed = settled and type(res) == 'table' and res.committed == true
     local reason = (settled and type(res) == 'table' and res.reason) or nil
 
