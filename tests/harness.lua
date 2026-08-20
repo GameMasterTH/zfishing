@@ -235,6 +235,22 @@ function H.fireLatestTimer()
     return t
 end
 
+-- Pins math.random(a, b) -- the form Encounter.Begin uses to mint a challenge seed --
+-- so a fight's whole RNG stream is reproducible. Without it a behaviour test can only
+-- assert a distribution, and a distribution assertion is a flaky test wearing a
+-- statistics costume.
+function H.withSeed(seed, fn)
+    local real = math.random
+    math.random = function(a, b)
+        if a == nil then return real() end
+        if b == nil then return math.min(seed, a) end
+        return math.max(a, math.min(b, seed))
+    end
+    local ok, err = pcall(fn)
+    math.random = real
+    if not ok then error(err, 0) end
+end
+
 function H.run()
     local failures = 0
     for _, entry in ipairs(tests) do
