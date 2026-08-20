@@ -17,18 +17,48 @@ function Rewards.RollRareLoot(src)
     return nil
 end
 
+-- Detail recorded when a stage was skipped because the src changed hands. One
+-- string so the console line and the tests agree on what a blocked stage looks like.
+local IDENTITY_BLOCKED = 'identity guard blocked stale settlement'
+
 -- Runs one secondary effect of an already-committed catch. A stage that fails --
--- raised, or reported false -- is recorded as a warning and logged with its cause;
--- it never propagates, because by the time these run the fish is already in the
--- player's inventory. Every stage must return an explicit boolean: `not err`
+-- raised, or reported false -- is recorded as a structured warning carrying its
+-- cause; it never propagates, because by the time these run the fish is already in
+-- the player's inventory. Every stage must return an explicit boolean: `not err`
 -- rather than `err == false` so a stage that forgets to return cannot pass silently.
-local function runStage(src, warnings, stage, fn)
+--
+-- Nothing is printed here, deliberately. `server/session.lua` owns the session id
+-- and the captured identity, so it is the only place that can log the full context
+-- -- and it logs each warning exactly once. Printing here as well put two console
+-- records in front of an operator for one logical failure.
+local function runStage(warnings, stage, fn)
     local ok, err = pcall(fn)
     if not ok or not err then
-        warnings[#warnings + 1] = stage
-        print(('[zfishing] catch settlement warning src=%s stage=%s: %s')
-            :format(tostring(src), stage, ok and 'stage reported failure' or tostring(err)))
+        warnings[#warnings + 1] = {
+            stage = stage,
+            detail = ok and 'stage reported failure' or tostring(err),
+        }
     end
+end
+
+-- A post-commit stage that mutates the PLAYER (inventory, XP cache, a notification)
+-- runs only while the src still belongs to the player this catch was rolled for:
+--
+--   gone     an ordinary disconnect. Skipped silently -- there is nobody to
+--            mutate, and warning on an expected disconnect trains operators to
+--            ignore the line (the same reason the old cache-empty early returns
+--            were silent).
+--   changed  the src was reused mid-settlement. Skipped AND recorded: a stale
+--            coroutine reaching a different player is the thing this guard exists
+--            for, so it must be visible in the console.
+local function runPlayerStage(src, expected, warnings, stage, fn)
+    local state = Progression.IdentityState(src, expected)
+    if state == 'gone' then return end
+    if state == 'changed' then
+        warnings[#warnings + 1] = { stage = stage, detail = IDENTITY_BLOCKED }
+        return
+    end
+    runStage(warnings, stage, fn)
 end
 
 -- The catch commit boundary.
@@ -41,9 +71,31 @@ end
 -- operator, not as a client-visible outcome.
 --
 -- Returns a structured result rather than a boolean:
---   { ok = true,  committed = true,  warnings = { <stage>, ... } }
---   { ok = false, committed = false, reason = 'inv_full' }
-function Rewards.GiveCatch(src, fish, zoneName)
+--   { ok = true,  committed = true,  warnings = { { stage = ..., detail = ... }, ... } }
+--   { ok = false, committed = false, reason = 'inv_full' | 'player_gone'
+--                                             | 'identity_changed' | 'no_identity' }
+--
+-- `ctx` carries the identity this catch was rolled for: { sessionId, identifier }.
+-- It is REQUIRED. Settlement spans several yields, and FiveM reassigns source ids,
+-- so "whoever is on src" is not the same statement as "the player who cast" --
+-- only the captured identifier is. A missing one fails closed.
+function Rewards.GiveCatch(src, fish, zoneName, ctx)
+    local expected = type(ctx) == 'table' and ctx.identifier or nil
+    if type(expected) ~= 'string' then
+        return { ok = false, committed = false, reason = 'no_identity' }
+    end
+
+    -- The identity gate, above the commit point. Between the cast that rolled this
+    -- fish and this line the player may have dropped, and their src may already
+    -- belong to somebody else. Handing the catch to whoever holds that src now
+    -- would give a stranger a fish that was rolled against another player's gear,
+    -- level and zone -- so nothing is granted at all.
+    local state = Progression.IdentityState(src, expected)
+    if state ~= 'same' then
+        return { ok = false, committed = false,
+            reason = state == 'gone' and 'player_gone' or 'identity_changed' }
+    end
+
     -- enhanced mode carries per-catch weight/quality in item metadata; simple mode
     -- has no per-instance metadata, so the catch is a plain stack. The mode is the
     -- one the resolver pinned -- we never send metadata that would be dropped.
@@ -61,23 +113,27 @@ function Rewards.GiveCatch(src, fish, zoneName)
     -- ---------------- COMMITTED from here down ----------------
     local warnings = {}
 
-    runStage(src, warnings, 'xp_save_failed', function()
-        -- the player dropped mid-settle: the progression cache is already gone, so
-        -- there is nothing to persist and nothing worth warning an operator about
-        if not Progression.Get(src) then return true end
+    -- AddXP writes cache[src] and SaveAwait reads it, so both would land on the
+    -- replacement occupant if the src changed hands during the AddItem above.
+    -- (SaveAwait's WHERE clause is safe on its own -- it captures c.identifier
+    -- before the MySQL yield -- but the cache mutation in AddXP is not.)
+    runPlayerStage(src, expected, warnings, 'xp_save_failed', function()
         Progression.AddXP(src, fish.xp)
         return Progression.SaveAwait(src)
     end)
 
-    runStage(src, warnings, 'catch_log_failed', function()
-        local c = Progression.Get(src)
-        if not c then return true end          -- dropped mid-settle: no identifier to log against
+    -- NOT identity-guarded, and that is the point: this row is catch HISTORY, not
+    -- a player mutation, and it belongs to the identifier the fish was rolled for
+    -- whatever happened to the src since. Re-reading Progression.Get(src) here --
+    -- which is what this did -- files the catch under whoever holds that src by
+    -- the time the insert runs, so a reused src rewrote another player's history.
+    runStage(warnings, 'catch_log_failed', function()
         return MySQL.insert.await(
             'INSERT INTO zfishing_catches (identifier, species, weight, quality, zone) VALUES (?, ?, ?, ?, ?)',
-            { c.identifier, fish.species, fish.weight, fish.quality, zoneName }) ~= nil
+            { expected, fish.species, fish.weight, fish.quality, zoneName }) ~= nil
     end)
 
-    runStage(src, warnings, 'rare_loot_failed', function()
+    runPlayerStage(src, expected, warnings, 'rare_loot_failed', function()
         local loot = Rewards.RollRareLoot(src)
         if not loot then return true end       -- nothing rolled is the common case
         if not Zfishing.AddItem(src, loot, 1, nil) then return false end
@@ -111,12 +167,21 @@ local gate = ZUtil.MakeRateGate({
 --     species-average weight / 3-star quality and the player is told explicitly.
 -- All inventory access goes through the pinned runtime contract -- no direct
 -- vendor inventory export and no GetResourceState auto-detect.
-local function collectSale(src)
+--
+-- `samePlayer()` is re-checked before EVERY removal, not once at the top. The
+-- sweep is a loop of resource-boundary calls that each yield, so a src that
+-- changes hands halfway through would have the remaining removals strip the
+-- REPLACEMENT occupant's fish. It costs one identifier lookup per removed stack;
+-- selling is a manual NPC interaction, not a hot path. Returns a third value:
+-- false means the sweep stopped early and `removed` is a partial list somebody
+-- has to reconcile.
+local function collectSale(src, samePlayer)
     local total, removed = 0, {}
     if Zfishing.Enhanced() then
         for species in pairs(Config.Fish) do
             local item = 'fish_'..species
             for _, slot in ipairs(Zfishing.Search(src, { item })) do
+                if not samePlayer() then return total, removed, false end
                 local count = slot.count or 1
                 local price = Rewards.Price(species, slot.metadata) * count
                 if price > 0 and Zfishing.RemoveItemSlot(src, item, count, slot.slot) then
@@ -130,6 +195,7 @@ local function collectSale(src)
             local item = 'fish_'..species
             local count = Zfishing.ItemCount(src, item)
             if count > 0 then
+                if not samePlayer() then return total, removed, false end
                 local avgWeight = (cfg.weight.min + cfg.weight.max) / 2
                 local price = Rewards.Price(species, { weight = avgWeight, quality = 3 }) * count
                 if Zfishing.RemoveItem(src, item, count) then
@@ -139,7 +205,7 @@ local function collectSale(src)
             end
         end
     end
-    return total, removed
+    return total, removed, true
 end
 
 -- Correlation id for one sale attempt. Server-side only -- it is never sent to the
@@ -174,19 +240,69 @@ local function restoreSale(src, removed)
     return { restored = restored, failed = failed }
 end
 
-local function runSale(src, saleId)
-    local total, removed = collectSale(src)
+-- Is the player on this src still the one this sale was opened for?
+--
+-- The catch path asks Progression for this, but a sale cannot: a player who has
+-- never cast has no progression cache, and treating that as "gone" would refuse
+-- every first sale. So the sale reads the canonical identifier straight from the
+-- pinned runtime contract -- never anything the client supplied.
+local function saleIdentityState(src, expected)
+    local current = Zfishing.Identifier(src)
+    if not current then return 'gone' end
+    if current ~= expected then return 'changed' end
+    return 'same'
+end
+
+-- A sale whose player changed underneath it. The fish are already out of the
+-- ORIGINAL player's inventory and there is nobody safe to settle against: paying
+-- the replacement occupant hands a stranger another player's money, and restoring
+-- into them hands a stranger another player's fish. So the transaction stops dead
+-- and prints everything an admin needs to make the original player whole by hand.
+--
+-- Deliberately console-only. A DB economy ledger is a separate piece of work; this
+-- window is a disconnect landing between two specific yields of one manual NPC
+-- interaction, and the reconciliation philosophy already in place for a failed
+-- payout is "one correlated record an admin can act on", not "roll it back".
+local function abortSale(sale, stage, total, removed)
+    print(('[zfishing] sale aborted on identity loss saleId=%s src=%s identity=%s stage=%s expectedPayout=%d removed=%d')
+        :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage, total, #removed))
+    for _, r in ipairs(removed) do
+        print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s identity=%s stage=%s lost item=%s count=%s meta=%s expectedPayout=%d')
+            :format(sale.id, tostring(sale.src), ZUtil.SafeId(sale.identifier), stage,
+                r.item, tostring(r.count), metaSummary(r.metadata), total))
+    end
+    return { ok = false, total = 0, reason = 'sale_failed' }
+end
+
+local function runSale(src, sale)
+    local function samePlayer() return saleIdentityState(src, sale.identifier) == 'same' end
+
+    -- before anything leaves the inventory
+    if not samePlayer() then return abortSale(sale, 'removal', 0, {}) end
+
+    local total, removed, swept = collectSale(src, samePlayer)
+    if not swept then return abortSale(sale, 'removal', total, removed) end
     if total <= 0 then return { ok = false, total = 0 } end
 
+    -- before money moves. The sweep's own guard cannot cover this: it stops
+    -- checking once the last stack is gone, and the removals themselves yield.
+    if not samePlayer() then return abortSale(sale, 'payout', total, removed) end
+
     if not Zfishing.AddMoney(src, total, 'fish-sale') then
+        -- before the fish go back. Compensation is an AddItem to `src`, so a src
+        -- that changed hands during the failed payout would have the original
+        -- player's fish materialise in the replacement occupant's bag.
+        if not samePlayer() then return abortSale(sale, 'compensation', total, removed) end
+
         local comp = restoreSale(src, removed)
-        print(('[zfishing] sale payout failed saleId=%s src=%s expectedPayout=%d removed=%d restored=%d restoreFailed=%d')
-            :format(saleId, tostring(src), total, #removed, comp.restored, #comp.failed))
+        print(('[zfishing] sale payout failed saleId=%s src=%s identity=%s expectedPayout=%d removed=%d restored=%d restoreFailed=%d')
+            :format(sale.id, tostring(src), ZUtil.SafeId(sale.identifier), total, #removed, comp.restored, #comp.failed))
         -- the only path where a player is actually down fish with nothing to show
         -- for it; everything an admin needs to make them whole goes on one line
         for _, r in ipairs(comp.failed) do
-            print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s lost item=%s count=%s meta=%s expectedPayout=%d')
-                :format(saleId, tostring(src), r.item, tostring(r.count), metaSummary(r.metadata), total))
+            print(('[zfishing] CRITICAL sale reconciliation saleId=%s src=%s identity=%s stage=restore_failed lost item=%s count=%s meta=%s expectedPayout=%d')
+                :format(sale.id, tostring(src), ZUtil.SafeId(sale.identifier),
+                    r.item, tostring(r.count), metaSummary(r.metadata), total))
         end
         return { ok = false, total = 0, reason = 'payout_failed' }
     end
@@ -206,12 +322,22 @@ lib.callback.register('zfishing:sellAll', function(src)
     if selling[src] then return { ok = false, total = 0, reason = 'sale_busy' } end
 
     selling[src] = true
-    local saleId = newSaleId(src)
-    local ok, res = pcall(runSale, src, saleId)
+    -- Captured once, before the first inventory yield: every mutation boundary in
+    -- runSale compares the live identifier against this one, so a src reassigned
+    -- mid-transaction can never be removed from, paid, or compensated.
+    local sale = { id = newSaleId(src), src = src, identifier = Zfishing.Identifier(src) }
+    if type(sale.identifier) ~= 'string' then
+        selling[src] = nil
+        -- fail closed: with no identity to capture, no guard below can mean anything
+        print(('[zfishing] sale refused: no stable identity saleId=%s src=%s'):format(sale.id, tostring(src)))
+        return { ok = false, total = 0, reason = 'sale_failed' }
+    end
+
+    local ok, res = pcall(runSale, src, sale)
     selling[src] = nil
 
     if not ok then
-        print(('[zfishing] sellAll errored saleId=%s src=%s: %s'):format(saleId, tostring(src), tostring(res)))
+        print(('[zfishing] sellAll errored saleId=%s src=%s: %s'):format(sale.id, tostring(src), tostring(res)))
         return { ok = false, total = 0, reason = 'sale_failed' }
     end
     return res

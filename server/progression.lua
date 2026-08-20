@@ -23,6 +23,27 @@ end
 
 function Progression.Get(src) return cache[src] end
 
+-- Identity state of a src, seen from an operation that captured `expected` before
+-- it yielded:
+--
+--   'same'    the cache under this src still belongs to the player who started
+--             the operation -- mutating them is safe
+--   'gone'    nobody is loaded under this src: an ordinary disconnect
+--   'changed' the src has been reused by a DIFFERENT player while the operation
+--             was still in flight -- mutating them would hit the wrong person
+--
+-- FiveM recycles source ids, so a coroutine that survives a yield can wake up
+-- holding a src that now belongs to someone else. This is the ONE comparison
+-- every catch-side identity guard delegates to; a non-string `expected` never
+-- matches, so a caller that forgot to capture an identity fails closed rather
+-- than comparing nil against nil and calling it a match.
+function Progression.IdentityState(src, expected)
+    local c = cache[src]
+    if not c then return 'gone' end
+    if type(expected) ~= 'string' or c.identifier ~= expected then return 'changed' end
+    return 'same'
+end
+
 function Progression.AddXP(src, amount)
     local c = cache[src]; if not c then return 1 end
     c.xp = c.xp + amount

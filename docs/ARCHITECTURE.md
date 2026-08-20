@@ -692,7 +692,7 @@ parts keep wearing.
   weight"*.
 
 **The sale invariant: money paid ≤ the value of the fish that actually left the
-inventory.** Three rules hold it up.
+inventory, and only ever to the player it left.** Four rules hold it up.
 
 1. **Remove first, pay once, from the removals.** Price is accumulated only inside
    the branch where `RemoveItemSlot` / `RemoveItem` returned true, so a slot the
@@ -714,6 +714,22 @@ inventory.** Three rules hold it up.
    mid-sale disconnect (`playerDropped` in `server/rewards.lua`, because an
    abandoned callback coroutine never returns through the `pcall`).
 
+4. **A sale belongs to an identity, not to a src.** `sellAll` captures
+   `Zfishing.Identifier(src)` into the sale record before the first inventory
+   yield and re-checks it at every mutation boundary: before the sweep, **before
+   each removal inside it**, before `AddMoney`, and before compensation. A sale
+   that cannot obtain an identifier is refused before the inventory is read.
+
+   The sale cannot use `Progression.IdentityState` the way the catch path does —
+   a player who has never cast has no progression cache, and treating that as
+   "gone" would refuse every first sale — so it reads the canonical identifier
+   from the pinned runtime contract instead. Never anything the client supplied.
+
+   The per-removal check is not paranoia: the sweep is a loop of resource-boundary
+   calls that each yield, so a src changing hands halfway through would have the
+   remaining removals strip the *replacement* occupant's fish. It costs one
+   identifier lookup per removed stack, on a manual NPC interaction.
+
 A `sell` flood gate (max 2 per 3000ms) sits in front of all of it, so a spammed
 sale costs a table lookup rather than a full inventory sweep.
 
@@ -727,6 +743,23 @@ summary and expected payout. That is everything needed to make a player whole.
 There is deliberately **no** per-sale success line: a successful sale already has
 a client-visible receipt, and one line per sale would bury the CRITICAL lines. A
 DB ledger is out of scope; the console record is what an admin reconciles from.
+
+**Identity loss mid-sale takes the same route.** When a guard fires, the
+transaction stops dead — the replacement occupant is neither paid nor given the
+original player's fish back, because both would hand a stranger something that is
+not theirs. What is already out of A's bag stays out, and the console gets:
+
+```
+[zfishing] sale aborted on identity loss saleId=<id> src=<n> identity=<safe> stage=<stage> expectedPayout=<n> removed=<n>
+[zfishing] CRITICAL sale reconciliation saleId=<id> src=<n> identity=<safe> stage=<stage> lost item=… count=… meta=… expectedPayout=<n>
+```
+
+one CRITICAL per stack that left the inventory, all sharing the `saleId`.
+`stage` is `removal`, `payout` or `compensation` — where identity was lost — and
+the pre-existing failed-restore path now carries `stage=restore_failed`. This is
+deliberately manual: the window is a disconnect landing between two specific
+yields of one NPC interaction, and the reconciliation philosophy here has always
+been "one correlated record an admin can act on", not a rollback.
 
 ### 4.5 The catch commit boundary
 
@@ -756,16 +789,94 @@ Zfishing.AddItem(fish)
 
 Each secondary stage runs in its own `pcall` and must return an explicit boolean;
 `runStage` treats `not err` as failure, so a stage that forgets to return cannot
-pass silently. A failed stage appends its name to `warnings` and prints its cause;
-`server/session.lua` then prints one `catch settlement warning` line per warning
-next to the `claim settled … committed=true` line. **The client is never told.**
+pass silently. A failed stage appends `{ stage, detail }` to `warnings`.
+**`rewards.lua` prints nothing.** `server/session.lua` — the only scope holding the
+session id and the captured identity — prints one line per warning, next to the
+`claim settled …` line. **The client is never told.**
 
-Two cases deliberately do *not* warn: a player who dropped mid-settle (both
-persistence stages return early when the progression cache is already gone — an
-expected disconnect, and warning on it would train operators to ignore the line),
-and a 0-XP species (`ConfigSchema` clamps `xp` to `0..100000`, so 0 is reachable,
-and MySQL reports 0 changed rows for a write of identical values — `SaveAwait`
-therefore tests `affected ~= nil`, not `affected > 0`).
+```
+[zfishing] catch settlement warning session=<id> src=<n> identity=<safe> stage=<stage> detail=<cause>
+```
+
+**One secondary failure produces exactly one console record.** `runStage` used to
+print its own line *and* session.lua printed a second from `res.warnings`; that
+duplication was removed in the 2026-08-19 identity pass. `tests/security.test.lua`
+group S asserts the **count**, not the presence — a find-based assertion is
+satisfied by the duplicate it exists to catch.
+
+Two cases deliberately do *not* warn: a player who dropped mid-settle (the
+identity guard below skips player-facing stages silently when nobody is on the
+src — an expected disconnect, and warning on it would train operators to ignore
+the line), and a 0-XP species (`ConfigSchema` clamps `xp` to `0..100000`, so 0 is
+reachable, and MySQL reports 0 changed rows for a write of identical values —
+`SaveAwait` therefore tests `affected ~= nil`, not `affected > 0`).
+
+#### The identity guard: source-id reuse
+
+**FiveM source ids are recycled.** A settlement yields on every step, so this
+sequence is reachable:
+
+```
+player A on src=17 → claim enters settlement → AddItem yields
+                                             → A disconnects
+                                             → src=17 is assigned to player B
+                                             → A's coroutine resumes holding src=17
+```
+
+Without a guard the resumed coroutine grants B the fish, adds B the XP, drops A's
+rare loot in B's bag, files A's catch under B's identifier, and — in `session.lua`
+itself — frees B's live session and spends one of B's `Config.RateLimit` slots.
+
+The fix is a **stable identifier captured at cast time**, on the session next to
+`sessionId`, and re-checked at every mutation boundary:
+
+| Where | Comparison | On mismatch |
+|---|---|---|
+| `zfishing:cast` | `prog.identifier` must be a string | refuse the cast (`no_identity`) — fail closed before a reward-bearing session exists |
+| `GiveCatch`, above `AddItem` | `Progression.IdentityState(src, ctx.identifier)` | nothing is committed: `player_gone` / `identity_changed` |
+| XP stage, rare-loot stage | same | stage skipped; `changed` records a warning, `gone` is silent |
+| catch-log stage | **none, deliberately** | writes `ctx.identifier` — see below |
+| `session.lua`, after the settlement yield | `sessions[src] == s` | skip `reset(src)` and the rate increment |
+
+`Progression.IdentityState(src, expected)` is the **single comparison** every
+catch-side guard delegates to. It answers `same` / `gone` / `changed`, and a
+non-string `expected` never matches, so a caller that forgot to capture identity
+fails closed. Each mutation has exactly one guard: two layers would mean deleting
+one still blocks the mutation, and the mutation tests could not fail.
+
+**`sessionId` ≠ player identity, and neither substitutes for the other.**
+`sessionId` is per-cast and makes a *stale or replayed request for this session*
+detectable — which is still true when the src changed owners. The stable
+identifier is per-player and makes *this src is no longer that player* detectable.
+Different problems, both needed.
+
+**The catch log is not identity-guarded, and that is the point.** The row is
+history, not a player mutation, so it is written against `ctx.identifier`
+regardless of what happened to the src. Re-reading `Progression.Get(src)` there —
+which is what it used to do — files A's fish under whoever holds A's src by the
+time the insert runs.
+
+**Committed stays committed.** Identity lost *before* `AddItem` means nothing is
+granted at all. Identity lost *after* it leaves `committed = true`, skips every
+remaining player mutation, records a warning, and never rolls the fish back. The
+client still gets `ok = true`.
+
+**Disconnect is not a breach.** `gone` (nobody on that src) is the ordinary case
+and is logged only as `reason=player_gone` on the routine claim line. `changed`
+(someone else on that src) gets its own record:
+
+```
+[zfishing] identity guard blocked stale settlement session=<id> src=<n> expected=<safe> stage=catch_commit
+```
+
+Identifiers in both lines go through `ZUtil.SafeId` — scheme plus the last four
+characters (`license:...7890`), enough to correlate two lines or match a DB row
+without pasting a full license id into a console dump. Guards always compare the
+**full** identifier; a redacted form can collide.
+
+`player_gone`, `identity_changed` and `no_identity` never reach the wire.
+`session.lua` collapses them to `claim_failed`, which `client/minigame.lua`'s
+unmapped-reason fallback renders as `error_claim_failed`.
 
 **Persistence is awaited only here.** `Progression.Save()` stays fire-and-forget
 for `Unload` / `playerDropped` / the QA command, where nobody reads the result;
@@ -1089,6 +1200,21 @@ the client to match.
 `PART_TYPES` + `SLOT_OF`), and `client/rig.lua` (local `PART_TYPES` + `SLOT_OF`).
 Adding a fifth socket type means editing all three, plus `web/src/rigRows.ts`.
 
+**4b. A transient FiveM source id is never sufficient identity for a coroutine
+that can survive a yield.**
+Source ids are recycled. Any operation that yields and then mutates player state
+must have captured something stable *before* the yield and re-checked it *after*:
+the fishing session captures `identifier` alongside `sessionId`
+(`server/session.lua`), the catch settlement carries it in `ctx`
+(`server/rewards.lua`), the sale captures it into the sale record, and
+`session.lua`'s own post-settlement `reset` / rate-increment guard on
+`sessions[src] == s`. `Progression.IdentityState` is the one comparison the catch
+side uses; the sale side uses `Zfishing.Identifier` because a player who never
+cast has no progression cache. **Adding a new yielding operation that touches
+player state means adding a capture and a re-check** — `sessionId` alone does not
+cover it, because a replayed-session check is still satisfied when the src changed
+owners. Every guard is individually mutation-tested (§10).
+
 **5. Zone distance is 2D in both places and must stay that way.**
 `client/main.lua`'s `currentZone()` and `server/session.lua`'s `resolveZone()` both
 compare squared horizontal distance, ignoring Z. If one becomes 3D, players will
@@ -1252,10 +1378,14 @@ caught nothing. Groups N and O in `tests/security.test.lua` are the guard.
   game client, a real inventory resource, or a real database.
   `docs/testing/zfishing-live-e2e-checklist.md` is the manual pass that has to be
   run on a real server before any of this is called production-verified.
-- Suite sizes as of the 2026-08-19 final-hardening pass: Lua **97 / 5 / 11**
+- Suite sizes as of the 2026-08-19 identity-hardening pass: Lua **122 / 5 / 11**
   (`security`, `water_validation`, `water_validation_preservation`), `web/`
-  **18 test files, 69 tests** (~6s, vitest 2.1.9; run it from `web/`, not the
-  repo root — the jsdom environment comes from `web/`'s own config). The web run includes
+  **18 test files, 71 tests** (~7s, vitest 2.1.9; run it from `web/`, not the
+  repo root — the jsdom environment comes from `web/`'s own config). The Lua count
+  rose from 97: groups **Q** (source-id reuse on the catch path, 12 tests),
+  **R** (source-id reuse on the sale path, 8) and **S** (one-warning-per-failure,
+  5). Eight guards were mutation-tested individually — each was removed, the
+  named test confirmed failing, and the guard restored before the next. The web run includes
   `bundleRebuildPreservation.test.ts`, so the Lua sha256 baseline described in §8
   invariant 7 currently *matches* the files on disk — the guard is live, not
   already broken.
@@ -1285,6 +1415,38 @@ migration.
 ---
 
 ## 12. Change history
+
+### The identity-hardening pass — 2026-08-19
+
+Closes the **source-id reuse** class: a coroutine created for player A must never
+mutate player B, even when B has since been given A's FiveM source id. No
+previously shipped protection was changed — `sessionId`, the settling lock, claim
+idempotency, the flood gates, the server-authoritative roll, the commit boundary
+and the sale lock all still hold; this pass adds a second, orthogonal axis of
+identity underneath them.
+
+This was **defensive** work. Source-id reuse was reachable by reading the code, not
+by an observed exploit, and the tests demonstrate the guards — not that anyone had
+been through the window.
+
+| Change | Where |
+|---|---|
+| `identifier` captured on the session at cast, alongside `sessionId`; cast fails closed without one | `server/session.lua` |
+| `Progression.IdentityState(src, expected)` → `same` / `gone` / `changed` — the single catch-side comparison | `server/progression.lua` |
+| `GiveCatch(src, fish, zone, ctx)`: identity gate above `AddItem`, per-stage guard on XP and rare loot | `server/rewards.lua` |
+| Catch log writes the **captured** identifier instead of re-reading `Progression.Get(src)` | `server/rewards.lua` |
+| Sale captures identity and re-checks it before the sweep, before each removal, before payout, before compensation | `server/rewards.lua` |
+| `session.lua`'s own post-yield `reset(src)` + rate increment guarded on `sessions[src] == s` | `server/session.lua` |
+| Duplicate settlement warning removed: `runStage` records, `session.lua` logs, one record per failure | `server/rewards.lua`, `server/session.lua` |
+| `ZUtil.SafeId` — redacted identifier for console lines | `shared/util.lua` |
+| `error_no_identity` | `locales/en.json`, `locales/th.json` |
+
+**Deliberate non-changes.** The minigame stays client-authoritative (a separate
+architectural project — §10). No DB economy ledger: mid-sale identity loss is
+reconciled from the console, as a failed payout already was. `Progression.Save()`
+stays fire-and-forget for its existing callers.
+
+**Live E2E: still NOT VERIFIED.** Nothing in this pass was run inside FiveM.
 
 ### The final hardening pass — 2026-08-19
 

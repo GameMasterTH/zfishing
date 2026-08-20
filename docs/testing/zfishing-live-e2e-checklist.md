@@ -19,6 +19,29 @@ against a running server. Until every row below is filled in on a real server,
 Mode under test: `________________`  ·  Server build: `________________`  ·
 Date: `________________`  ·  Tester: `________________`
 
+**Status: NOT VERIFIED.** No row below has been executed on a real server. This
+file is the release-candidate gate: `zfishing` cannot be called READY FOR
+PRODUCTION until it is filled in and signed off. Automated suites passing is not
+evidence for any row here.
+
+**Marking rules.** `Pass` means you performed the steps and observed the expected
+result. `Fail` means you observed something else — write what. `N/A` means the row
+cannot be executed here and needs a stated reason (no second player, no modified
+client, no way to force a DB failure). **Never mark a row Pass that you did not
+run**, and never infer one row from another.
+
+### Coverage map
+
+| Area | Sections |
+|---|---|
+| Core fishing (catch, miss hook, escape, snap, timeout, inventory full) | B, C |
+| Session security (stale/replayed claim, cancel while settling, disconnects) | D, G |
+| Sales (normal, double-click, payout + compensation failures, disconnect) | E |
+| Boats | F |
+| Persistence (XP, catch row, restart, DB failure) | I |
+| Runtime compatibility | J |
+| Performance | K |
+
 ---
 
 ## A. Boot and mode
@@ -28,6 +51,7 @@ Date: `________________`  ·  Tester: `________________`
 | A1 | Start the server with `zcore_lib` running | Console prints `[zfishing] runtime mode = <mode> (<framework> + <inventory>)` and **no** DDL/schema line | | |
 | A2 | Start the server with `zcore_lib` **stopped** | Console prints `runtime profile unavailable ... fishing disabled`; using a rod notifies "unavailable", nothing crashes | | |
 | A3 | Join the server, watch the console for 30s | Exactly one `zfishing:store:sync` per client; no repeated sync spam | | |
+| A4 | Make `zcore_lib` return a valid profile but **no identifier** for your account (break the framework's identifier lookup), then use a rod and cast | Cast is refused with *"Your player identity could not be verified — rejoin and try again"* (`error_no_identity`) — the message renders, not the raw key. No session starts, nothing in the console crashes. If the framework cannot be made to answer without an identifier, mark **N/A** with that reason | | |
 
 ## B. The happy path
 
@@ -63,6 +87,10 @@ Date: `________________`  ·  Tester: `________________`
 | D9 | Stop the database (or break the `zfishing_players` write), then land a catch | Player gets the fish and the catch card as normal; console prints `catch settlement warning … stage=xp_save_failed` | | |
 | D10 | Same with the catch log write broken | Same — fish granted, `stage=catch_log_failed` in the console only | | |
 | D11 | Land a catch with the inventory full of everything **except** one fish slot, with rare loot rolling | Fish granted; if the loot cannot fit, console warns `stage=rare_loot_failed` and the catch still succeeds | | |
+| D12 | Disconnect **during settlement** — alt-F4 in the last half-second of the fight, repeat until one lands mid-settle | No console error, no stuck session; the claim line reads `committed=false reason=player_gone` **or** the catch committed before the drop. **No** `identity guard` line — a plain disconnect is not a breach | | |
+| D13 | Disconnect while **waiting for a bite**; reconnect and cast again | The new cast is accepted immediately — **not** `error_busy`. (The pending bite timer is guarded by object identity, `s.fish ~= fish`, so it cannot fire into the new session; that guard is covered by the Lua suite, not by anything visible here. The observable signal is only that the rejoined player can fish.) | | |
+| D14 | Disconnect **mid-reel** (while frozen in the fight); reconnect and cast again | Same — accepted immediately, no stuck `busy`, and the reel HUD does not reappear on rejoin | | |
+| D15 | Check the console after any D9–D11 failure | **Exactly one** `catch settlement warning` line per failed stage, carrying `session=`, `src=`, `identity=` and `detail=`. Two lines for one failure is a regression | | |
 
 ## E. Selling
 
@@ -75,6 +103,7 @@ Date: `________________`  ·  Tester: `________________`
 | E5 | (simple mode) Sell | Extra notification: "Sold at standard weight — this inventory has no per-catch weight" | | |
 | E6 | If you can force a money-add failure (framework offline / account missing), sell | Message "The payment failed — your fish were returned"; **the fish are back in the inventory**; console logs `sale payout failed … restoreFailed=0` and **no** CRITICAL line | | |
 | E7 | Force a money-add failure **and** a full inventory so the fish cannot go back | Console logs one `CRITICAL sale reconciliation` line per lost stack with item, count, metadata and expectedPayout, sharing the `saleId` of the summary line — enough to refund by hand | | |
+| E8 | Disconnect during a sale (alt-F4 the instant you confirm, repeat until one lands mid-sale) | No console error; the sale either completed before the drop or logged `sale aborted on identity loss` with a `stage=`; the reconnected player can sell again immediately (the lock was released) | | |
 
 ## F. Boats
 
@@ -107,6 +136,9 @@ mark them **N/A — no tooling** rather than Pass.
 | G8 | Spam the rig menu callbacks (attach/detach) | Refused after 10 per 5s; no item duplicated or destroyed | | |
 | G9 | Call `/zfish_xp` and `/zfish_roll` as a **non-admin** | Both refused | | |
 | G10 | Call them as an admin | Both work | | |
+| G11 | **Source reuse, catch.** Land a catch and disconnect inside the settlement window, then have a second player join onto the freed server id fast enough to inherit it | The replacement player receives **no** fish, **no** XP and **no** rare loot. If the id really was reused, the console shows one `identity guard blocked stale settlement … stage=catch_commit` line. Server ids are assigned by the server, so this is usually **N/A — cannot force src assignment** | | |
+| G12 | **Source reuse, sale.** Same, but disconnect during a sale | The replacement player is not paid and receives no restored fish; console shows `sale aborted on identity loss` plus one `CRITICAL sale reconciliation` per stack that left the original player's bag. Usually **N/A — cannot force src assignment** | | |
+| G13 | Check every identity/reconciliation line printed during G11–G12 | Identifiers appear redacted (`license:...1234`), never in full | | |
 
 ## H. Admin surface
 
@@ -116,11 +148,56 @@ mark them **N/A — no tooling** rather than Pass.
 | H2 | `/zfishzone`, place a zone, then fish in it | Zone works immediately for every player | | |
 | H3 | `/zfishreload` after editing a DB row directly | New value is live | | |
 
+## I. Persistence
+
+| # | Steps | Expected | Pass/Fail | Notes |
+|---|---|---|---|---|
+| I1 | Land a catch, then read `zfishing_players` for your identifier | `xp` and `level` reflect the catch | | |
+| I2 | Land a catch, then read `zfishing_catches` | One new row: your identifier, species, weight, quality, zone — matching the catch card | | |
+| I3 | Land a catch, disconnect immediately, read `zfishing_catches` | The row is still written, and under **your** identifier — a catch belongs to whoever caught it | | |
+| I4 | Restart the server, rejoin, check level and the admin panel | XP/level survived; every admin-edited config value survived | | |
+| I5 | Stop the DB, then fish | The player still gets the fish and the card; console warns per failed stage; nothing crashes and the session is not stuck | | |
+| I6 | Start the DB again, land a catch | Persistence resumes with no restart and no warnings | | |
+
+## J. Runtime compatibility
+
+Only the combinations this build actually claims to support, and only the ones you
+really started. Do **not** fill in a row you did not boot.
+
+| # | Framework + inventory (pinned mode) | Boot line correct | Catch | Sell | Rig menu | Pass/Fail | Notes |
+|---|---|---|---|---|---|---|---|
+| J1 | `________` + `________` (`enhanced-rig`) | | | | | | |
+| J2 | `________` + `________` (`simple-fishing`) | | | | | | |
+| J3 | `________` + `________` | | | | | | |
+
+## K. Performance
+
+Measure with FiveM's own tools — `resmon 1` for the per-resource frame cost and
+`profiler record <frames>` / `profiler view` for a breakdown. **Record the measured
+numbers first.** This table deliberately has no target column: a threshold invented
+after reading the result is not a threshold. Once these are filled in on real
+hardware, a follow-up pass can propose budgets from them.
+
+| # | Scenario | resmon ms (client) | resmon ms (server) | Notes |
+|---|---|---|---|---|
+| K1 | Idle, rod stowed | | | |
+| K2 | Rod equipped, standby | | | |
+| K3 | Cast, waiting for a bite | | | |
+| K4 | Active reeling (NUI minigame running) | | | |
+| K5 | Catch card open | | | |
+| K6 | 2+ anglers fishing simultaneously (state how many) | | | |
+| K7 | `profiler record 500` during K4, then `profiler view` | Name the top three zfishing entries | | |
+
+Hardware / server spec these were taken on: `________________________________`
+
 ---
 
 ## Sign-off
 
 Every row Pass (or an explicit, justified N/A): `______`  ·  Date: `__________`
+
+Until that line is signed, the release status is **RELEASE CANDIDATE at best** —
+never READY FOR PRODUCTION.
 
 Known gaps that this checklist **cannot** close, and that stay open regardless of
 the result: the minigame outcome is still decided by the NUI and only

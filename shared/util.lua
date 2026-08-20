@@ -62,3 +62,20 @@ local weatherSet = {}
 for _, w in ipairs(ZUtil.WEATHER_TYPES) do weatherSet[w] = true end
 
 function ZUtil.IsWeather(name) return weatherSet[name] == true end
+
+-- Console-safe form of a player identifier. The identity guards below log WHICH
+-- player a blocked operation belonged to, and those lines end up in console dumps
+-- and bug reports; the scheme plus the last four characters is enough to
+-- correlate two lines with each other or with a DB row, without pasting a full
+-- license/steam id somewhere it will be read by strangers.
+--
+-- Never used for comparison. Every guard compares the FULL identifier -- a
+-- redacted form has collisions, and an identity check that can collide is not
+-- an identity check.
+function ZUtil.SafeId(id)
+    if type(id) ~= 'string' or id == '' then return 'none' end
+    local scheme, rest = id:match('^(%w+):(.+)$')
+    if not scheme then return '...' .. id:sub(-4) end
+    if #rest <= 4 then return scheme .. ':' .. rest end
+    return scheme .. ':...' .. rest:sub(-4)
+end

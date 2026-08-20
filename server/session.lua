@@ -17,6 +17,13 @@ local gate = ZUtil.MakeRateGate({
 
 local function reset(src) sessions[src] = nil end
 
+-- Settlement reasons that exist for the console, not for a player: they describe
+-- what the server refused and, in the identity cases, refer to a player who is no
+-- longer the one holding this src. They never reach the wire (see the claim tail).
+local INTERNAL_REASONS = {
+    player_gone = true, identity_changed = true, no_identity = true,
+}
+
 local nextSessionSeq = 0
 
 -- Session tokens are correlation + stale-request protection, not secrets: a
@@ -107,7 +114,15 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
 
     if not Progression.Get(src) then Progression.Load(src) end
     local prog = Progression.Get(src)
-    local level = prog and prog.level or 1
+    -- A session that can end in a reward has to be tied to a stable identity, not
+    -- just to the src it was cast from. Settlement survives yields and FiveM
+    -- reassigns source ids, so without a captured identifier nothing downstream can
+    -- tell whether the player it is about to pay is still the one who cast. Fail
+    -- closed here rather than create a reward-bearing session nobody can verify.
+    if not prog or type(prog.identifier) ~= 'string' then
+        return { ok = false, reason = 'no_identity' }
+    end
+    local level = prog.level or 1
 
     -- Assembled-rig path: gear comes from the components fitted on THIS rod item
     -- (server re-reads the slot — the client only names it). Fallback = v1
@@ -158,6 +173,12 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
 
     sessions[src] = {
         id = newSessionId(),
+        -- `id` and `identifier` solve DIFFERENT problems and neither substitutes
+        -- for the other: `id` is per-cast and makes a stale or replayed request
+        -- for THIS session detectable; `identifier` is per-player and stable, and
+        -- is what tells a settlement that survived a yield whether the src it
+        -- holds still belongs to the player the fish was rolled for.
+        identifier = prog.identifier,
         state = 'waiting', fish = fish, bait = chosenBait, rod = rod,
         lineRating = stats and stats.lineRating or resolveLineRating(src, level),
         reelDrain = stats and stats.reelDrain or nil,
@@ -257,29 +278,64 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
     -- table) -- but it must stay, because cancel no longer frees a settling
     -- session: without it an error would park sessions[src] in 'settling' with
     -- nothing able to clear it and leave the player on `busy` until they reconnect.
-    local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone)
+    local settled, res = pcall(Rewards.GiveCatch, src, fish, s.zone,
+        { sessionId = s.id, identifier = s.identifier })
     local committed = settled and type(res) == 'table' and res.committed == true
+    local reason = (settled and type(res) == 'table' and res.reason) or nil
 
-    -- Config.RateLimit counts SUCCESSFUL catches (§3.1), so only a committed catch
-    -- spends a slot: a claim that never put a fish in the inventory must not cost
-    -- the player one. The rate table itself may be gone -- the player can drop
-    -- during the settle, and playerDropped clears rate[src].
-    if committed and rate[src] then rate[src].count = rate[src].count + 1 end
+    -- `sessions[src]` and `rate[src]` are keyed by a TRANSIENT src, and GiveCatch
+    -- just yielded across every step of the settlement. If the player dropped
+    -- during it, playerDropped already cleared both -- and if their src has since
+    -- been handed to somebody else, that someone owns these entries now. Touching
+    -- them would free a stranger's live session and spend a slot out of their
+    -- catch-rate budget. Same object-identity check the bite and hook-timeout
+    -- timers use (`s.fish ~= fish`), for the same reason.
+    --
+    -- For a player who is still here this always holds: cancel deliberately does
+    -- not free a settling session, cast is refused while one exists, and both
+    -- timers bail out on any state other than the one they scheduled for.
+    if sessions[src] == s then
+        -- Config.RateLimit counts SUCCESSFUL catches (§3.1), so only a committed
+        -- catch spends a slot: a claim that never put a fish in the inventory must
+        -- not cost the player one.
+        if committed and rate[src] then rate[src].count = rate[src].count + 1 end
+        reset(src)
+    end
 
-    print(('[zfishing] claim settled session=%s src=%s species=%s committed=%s')
-        :format(s.id, src, fish.species, tostring(committed)))
+    print(('[zfishing] claim settled session=%s src=%s species=%s committed=%s%s')
+        :format(s.id, src, fish.species, tostring(committed), reason and (' reason=' .. reason) or ''))
+
+    -- ONE line per failed settlement stage, and it is logged here rather than in
+    -- rewards.lua because this is the only scope that holds the session id and the
+    -- captured identity. GiveCatch records structured warnings and prints nothing,
+    -- so one failed stage leaves exactly one record for an operator to read.
     if settled and type(res) == 'table' then
         for _, w in ipairs(res.warnings or {}) do
-            print(('[zfishing] catch settlement warning session=%s src=%s stage=%s'):format(s.id, src, w))
+            print(('[zfishing] catch settlement warning session=%s src=%s identity=%s stage=%s detail=%s')
+                :format(s.id, src, ZUtil.SafeId(s.identifier), w.stage, w.detail))
         end
     end
 
-    reset(src)
+    -- The src changed hands while this catch was settling: the fish was rolled for
+    -- a player who is no longer on this id, and nothing was granted. Worth seeing.
+    -- A plain disconnect (player_gone) is NOT logged -- it is the ordinary case,
+    -- and warning on it would train operators to ignore the line.
+    if reason == 'identity_changed' then
+        print(('[zfishing] identity guard blocked stale settlement session=%s src=%s expected=%s stage=catch_commit')
+            :format(s.id, src, ZUtil.SafeId(s.identifier)))
+    end
+
     if not settled then
         print(('[zfishing] settlement errored session=%s src=%s: %s'):format(s.id, src, tostring(res)))
         return { ok = false, reason = 'settle_failed' }
     end
-    if not committed then return { ok = false, reason = res.reason or 'inv_full' } end
+    if not committed then
+        -- Identity failures name a server-side condition, and when the src was
+        -- reused the client receiving this answer is not even the player the catch
+        -- belonged to. They collapse to one generic outcome; client/minigame.lua's
+        -- unmapped-reason fallback renders it as error_claim_failed.
+        return { ok = false, reason = INTERNAL_REASONS[reason] and 'claim_failed' or (reason or 'inv_full') }
+    end
     return { ok = true, fish = { label = fish.label, weight = fish.weight, quality = fish.quality, species = fish.species } }
 end)
 
