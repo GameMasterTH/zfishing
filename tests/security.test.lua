@@ -635,6 +635,9 @@ local function loadSession(opts)
     end }
     dofile('shared/util.lua')
     dofile('shared/rig_rules.lua')
+    -- session.lua resolves and freezes an encounter at cast time
+    dofile('shared/encounters.lua')
+    dofile('server/encounter.lua')
     dofile('server/rig.lua')
     dofile('server/session.lua')
     return inv, rewardCalls
