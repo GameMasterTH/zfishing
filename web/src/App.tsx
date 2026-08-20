@@ -9,10 +9,11 @@ import CatchCard from './components/CatchCard'
 import PromptHud from './components/PromptHud'
 import RigMenu from './components/RigMenu'
 import AdminPanel from './admin/AdminPanel'
+import EncounterHost from './encounters/EncounterHost'
 import type { RigView, CatalogEntry } from './rigRows'
 import './style.css'
 
-type View = 'hidden' | 'casting' | 'waiting' | 'reeling' | 'caught'
+type View = 'hidden' | 'casting' | 'waiting' | 'reeling' | 'encounter' | 'caught'
 type Prompt = { titleKey: string; subtitleKey: string } | null
 
 export default function App() {
@@ -38,6 +39,10 @@ export default function App() {
         setHolding(false); setView('reeling'); setData(msg); break
       case 'reelInput':
         setHolding(!!msg.holding); break
+      case 'encounter':
+        setView('encounter'); setData(msg); break
+      case 'encounterState':
+        break   // EncounterHost subscribes to this itself
       case 'caught':
         setView('caught'); setData(msg); break
       case 'prompt':
@@ -83,6 +88,9 @@ export default function App() {
               fishWeight={data.fishWeight ?? 5}
               holding={holding}
             />
+          )}
+          {view === 'encounter' && (
+            <EncounterHost key={data.startedAt ?? 'enc'} msg={data} />
           )}
           {view === 'caught' && (
             <CatchCard label={data.label} weight={data.weight} quality={data.quality} />

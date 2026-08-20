@@ -10,6 +10,9 @@ end
 
 RegisterNetEvent('zfishing:bite', function(data)
     if not ZClient.active then return end
+    -- An encounter session is driven by client/encounter.lua. This handler is the
+    -- LEGACY tension fight and must not also run, or both would race the same hook.
+    if data.encounter and data.encounter ~= 'legacy_tension' then return end
     Casting.diving = true   -- bobber dives the moment the fish takes the bait
 
     PlaySoundFrontend(-1, 'TIMER_STOP', 'HUD_MINI_GAME_SOUNDSET', true)

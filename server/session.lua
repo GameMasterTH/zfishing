@@ -269,15 +269,15 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
     s.state = 'reeling'
     s.reelStart = GetGameTimer()
     -- A legacy session mints no challenge: its fight runs client-side exactly as before.
-    local challengeId
+    local challengeId, opening
     if s.encounter and s.encounter.type ~= Encounters.FALLBACK then
-        challengeId = Encounter.Begin(s, {
+        challengeId, opening = Encounter.Begin(s, {
             lineRating = s.lineRating,
             reelDrain  = s.reelDrain or 1.0,
             greenZone  = (Config.Equipment.rods[s.rod] or {}).greenZone or 0.0,
         })
     end
-    return { ok = true, challengeId = challengeId }
+    return { ok = true, challengeId = challengeId, encounter = opening }
 end)
 
 lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)

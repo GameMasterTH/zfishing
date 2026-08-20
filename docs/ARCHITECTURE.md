@@ -1710,9 +1710,137 @@ unregistered value is a hard validation error.
 `encounter` field returns it to the existing fight, and an encounter with no deployed
 module downgrades automatically.
 
+### 12.10 Counter-Pull Fight (`counter_pull`)
+
+The first real encounter. The fish telegraphs a direction; the player counters it.
+
+| fish state | counter | control | keyboard | controller |
+|---|---|---|---|---|
+| `LEFT_RUN` | `right` | `35` INPUT_MOVE_RIGHT_ONLY | D | stick right |
+| `RIGHT_RUN` | `left` | `34` INPUT_MOVE_LEFT_ONLY | A | stick left |
+| `DIVE` | `brace` | `33` INPUT_MOVE_DOWN_ONLY | S | stick down |
+| `FATIGUED` | `reel` | `22` | SPACE | A / cross |
+| `LANDING` | `reel` | `22` | SPACE | A / cross |
+
+All four controls are analog on a gamepad already, so controller support needs no
+separate mapping and there is no mashing anywhere in the fight.
+
+```
+armRun -> telegraph -> window opens -> player counters -> window closes
+   |                                        |
+   |                          correct: stamina -, counters +1
+   |                          wrong/missed: line -, misses +1, stamina +3
+   |                                        |
+   |            countersSinceFatigue == perFatigue -> armFatigue (k reels)
+   |                                        |
+   |                          stamina <= 0 -> armLanding (one reel)
+   |                                        |
+   +--------------- fumbled landing: stamina = 25, resume
+                                            |
+                                    reel hit -> success
+```
+
+**Tiers.** Times in ms; stamina and line are pools.
+
+| tier | telegraph | window | counters/fatigue | reels | stamina | line | mistake | maxMisses | fake |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 900 | 1400 | 3 | 2 | 100 | 100 | 20 | 6 | 0 |
+| 2 | 800 | 1200 | 3 | 2 | 120 | 100 | 22 | 5 | 0 |
+| 3 | 650 | 1000 | 4 | 3 | 150 | 90 | 25 | 5 | 0.10 |
+| 4 | 520 | 850 | 4 | 3 | 180 | 85 | 28 | 4 | 0.18 |
+| 5 | 420 | 700 | 5 | 3 | 220 | 80 | 30 | 4 | 0.25 |
+
+Gear enters as named knobs, never as the tier: the rod's `greenZone` multiplies the
+window, `Encounters.LineMult` scales the line pool, and the reel's `drainRate` scales
+stamina damage. The same rolled fish produces the same tier under any equipment.
+
+**Two failure clocks, deliberately.** `line` punishes *how badly* you were wrong
+(mistake damage); `maxMisses` punishes *how often*. Heavy line survives more damage but
+not more mistakes, so upgrading changes which clock you are racing rather than removing
+one. At tier 5 on a 10lb line the third mistake snaps the line before the fourth would
+have triggered an escape — that ordering is asserted in `tests/encounter_counter_pull.test.lua`.
+
+**Grace is ±250ms** on both window edges, in the same spirit as
+`Config.Timings.hookLatency`. A server window narrower than real network jitter would
+fail honest players. The right key outside the window is still a miss.
+
+**Fakes** appear at tier 3 and above. The server decides at phase-build time, sends
+`cue` (the decoy) plus `switchIn` and `nextCue`, and constrains the flip to at least
+400ms before the window shuts, so the switch is always something a watching player can
+react to. `nextCue` travels in the same payload because the NUI has to draw the flip and
+a round trip there would cost exactly the reaction time being tested — a modified client
+can therefore ignore fakes. It gains immunity to a flourish, not free wins.
+
+**`phaseId`.** Every `arm*` increments it. Phase name and window lengths repeat exactly;
+an id does not. The NUI re-anchors its clock on `phaseId` alone — without it, two
+consecutive identical `LEFT_RUN` phases leave React's effect dependencies unchanged, so
+the window bar never restarts and the no-input `advance` never re-arms.
+
+**`countersSinceFatigue`, not `counters % perFatigue`.** With a modulo, a fumbled
+landing on a divisible count drops straight back into another fatigue break, because the
+total is still divisible — the fight stalls instead of resuming. The counter is reset
+when a break is taken and again when a landing is fumbled.
+
+**Relative durations.** `M.render(enc, now)` emits `telegraphIn` / `windowOpensIn` /
+`windowClosesIn` / `switchIn`, never timestamps. Internal state stays absolute because
+that is what an incoming action is judged against. The server's `GetGameTimer()` and a
+client's share no origin, so arithmetic between them is meaningless in either direction
+and on either side — converting in the client bridge would be the same bug reversed.
+
+**The render payload never carries `required`.** A player derives the counter from the
+cue, which is the game; a payload field naming the answer hands an auto-counter bot a
+result it would otherwise have to interpret, and buys an honest client nothing.
+
+**Client orchestrates settlement.** `client/encounter.lua` holds one request in flight at
+a time (input polling and the NUI's deadline `advance` are two senders that would
+otherwise claim the same `seq` near a window edge, costing an honest player the input
+they made), and calls `zfishing:claim` itself the moment the server reports a terminal
+outcome. `encounterClosed` is a presentation-close signal that grants no permission — a
+NUI that never sends it cannot strand a won fight.
+
+**Flood-gate headroom, computed.** A tier-5 phase is `telegraph + window` = 1120ms, so
+the busiest honest 10-second slice holds about 9 actions. The `encounter` gate is 40 per
+10s (`server/session.lua`), roughly 4x headroom, and `MakeRateGate` is a fixed window
+rather than sliding.
+
 ---
 
 ## 13. Change history
+
+### Counter-Pull, the first encounter (Phase B) — 2026-08-21
+
+`counter_pull` ships end to end: the server state machine (§12.10), a client bridge that
+orchestrates the fight and settles it, a NUI panel, and 30 new tests across three suites.
+
+**Reachable only by an admin.** No fish carries an `encounter` field yet — that is Phase
+F — so DEFAULT still resolves every fish to `legacy_tension`. Setting
+`EncounterMode = forced, ForcedEncounter = counter_pull` is the only way into the new
+fight. `fish_mindgame` and `sonar_strike` still downgrade to legacy via
+`Encounter.Playable`.
+
+**Three additive contract refinements** to Phase A, in their own commit: `build` receives
+`ctx.now` so a module can arm its first phase against the clock the expiry timer uses;
+`render` takes `now` and emits relative durations; `Begin` returns the opening frame so
+`zfishing:hook` can hand the NUI something to draw before the player's first action.
+
+**Corrections made during plan review, before any code was written.** The render payload
+originally carried absolute server timestamps, and the first attempt to fix that
+converted them in the *client* bridge — the same clock-domain error reversed. Phases had
+no stable identity, so a repeat with matching timings was invisible to React. Fatigue
+used `counters % perFatigue`, which turned a fumbled landing into an immediate second
+fatigue break. A behaviour test compared dive counts across 30 random fights, which
+flakes about one run in six. Input polling and the NUI's `advance` could claim the same
+`seq`. And settlement waited on an NUI message, so a NUI that never answered stranded a
+won fight. All six are fixed in the shipped code and asserted by tests.
+
+**Not shipped, deliberately:** directional world feedback — rod lean, bobber displacement
+and splash driven by the authoritative phase. It needs work in `client/casting.lua` and
+the anim layer that is unrelated to the state machine, and is deferred to Phase G rather
+than half-implemented. The fight currently reads through the panel, sound and the
+existing fishing animation.
+
+**Not verified:** nothing in this phase has been run inside FiveM. No resmon or profiler
+measurement was taken.
 
 ### The encounter framework (Phase A) — 2026-08-20
 

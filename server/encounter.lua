@@ -70,14 +70,17 @@ function Encounter.Begin(s, gear)
     local mod = Encounter.MODULES[s.encounter.type]
     if not mod then return nil end
 
+    -- `now` is read before build so a module arms its first phase against the same
+    -- clock the expiry timer below is set from.
+    local now = GetGameTimer()
     local state, estimate = mod.build({
         difficulty = s.encounter.difficulty,
         seed       = math.random(1, 2147483647),
         fish       = s.fish,
         gear       = gear or {},
+        now        = now,
     })
 
-    local now = GetGameTimer()
     s.encounter.challengeId = s.id .. '#' .. math.random(100000, 999999)
     s.encounter.seq       = 0
     s.encounter.state     = state
@@ -97,7 +100,14 @@ function Encounter.Begin(s, gear)
         if live.encounter.outcome == nil then live.encounter.outcome = 'timeout' end
     end)
 
-    return s.encounter.challengeId
+    -- The opening frame. Without it the NUI has nothing to draw until the player's
+    -- first action -- the one moment they cannot act without seeing something.
+    --
+    -- render() takes `now` because every duration it emits is relative to it. Absolute
+    -- server timestamps must never reach a client: the server's GetGameTimer() and the
+    -- client's are unrelated clocks with unrelated origins, and arithmetic between them
+    -- is meaningless no matter which side performs it.
+    return s.encounter.challengeId, mod.render and mod.render(s.encounter, now) or nil
 end
 
 -- Normalized outcomes. Anything an encounter module reports has to be one of these --
