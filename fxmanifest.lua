@@ -12,6 +12,8 @@ shared_scripts {
     '@ox_lib/init.lua',
     'shared/util.lua',
     'shared/rig_rules.lua',
+    -- after shared/util.lua: Encounters.TierFor calls ZUtil.clamp
+    'shared/encounters.lua',
     'config/main.lua',
     'config/fish.lua',
     'config/equipment.lua',
