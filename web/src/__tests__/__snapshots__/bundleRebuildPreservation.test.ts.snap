@@ -19,7 +19,7 @@ exports[`Preservation: Lua source + fxmanifest untouched (Req 3.4) > Property 2:
   "config/main.lua": "9ea38ed37e1fe5fe83121a480b8eebf0cea97f1306efc61b987a59e6c524c36f",
   "config/weather.lua": "3752c8bf85a2339f5a7b2f8ee0bcbde5f0bc5e42c97a7697dff415908cd5f585",
   "config/zones.lua": "70dfe21848f14105d2a31bb384e67a0226c64e5d79f96706eb1b003dd989d160",
-  "fxmanifest.lua": "71bef0bcd174ed9866fd38a1907821d69630b384e2c56048d11e67849b3672bc",
+  "fxmanifest.lua": "a7b162c9808b5bfecfbadb461f9c2971b850efce59eb9a62c74a4c255bb28b39",
   "server/admin.lua": "ebdc987f893da668279eb8b36e63b49deed97381fcb947f9f83c256089559f44",
   "server/boat_anchor.lua": "be8a6f32d49a281f023e669892b02d3d8ef7ff25406375a29fe1f18675fe8e57",
   "server/config_schema.lua": "bb3c9e0462b5d0dcec5594cb45b0c1da31e04e8948bd1380db4ef05461493ece",

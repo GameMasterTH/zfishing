@@ -193,6 +193,50 @@ Hardware / server spec these were taken on: `________________________________`
 
 ---
 
+## L. Encounter system — Counter-Pull (Phase B)
+
+Nothing in this section has been executed. Every row is unticked because nobody has
+run it, not because it passed silently.
+
+Reaching the fight at all needs an admin: no fish is configured with an `encounter`
+yet (that is Phase F), so DEFAULT resolves everything to the legacy tension minigame.
+Set `EncounterMode = forced` and `ForcedEncounter = counter_pull` in the admin panel,
+and use a common fish for tier 1 and a legendary for tier 5.
+
+| # | Steps | Expected | Pass/Fail | Notes |
+|---|---|---|---|---|
+| L1 | FORCED counter_pull, catch a common fish | The counter-pull panel opens on hook, not the tension bar | | |
+| L2 | Counter a `LEFT_RUN` with D | Stamina drops, line untouched, a new phase arms | | |
+| L3 | Counter a `RIGHT_RUN` with A | Same | | |
+| L4 | Brace a `DIVE` with S | Same | | |
+| L5 | Press the correct key *before* the window opens | Scored as a miss — the cue is not a prompt to pre-press | | |
+| L6 | Land enough counters to reach `FATIGUED`, then reel | Stamina falls faster than a counter does | | |
+| L7 | Reach `LANDING` and hit it | Fish lands, catch card appears, item in inventory | | |
+| L8 | Reach `LANDING` and deliberately miss it | Fish recovers, the fight resumes with a normal run phase — **not** another fatigue break | | |
+| L9 | FORCED counter_pull on a legendary (tier 5) | Noticeably shorter telegraph and window than L1 | | |
+| L10 | Tier 3+ fish: watch for a fake telegraph | The cue visibly flips at least ~0.4s before the window shuts, and countering the *new* direction scores | | |
+| L11 | Miss deliberately until the line breaks | Ends as a snap; the fitted line component is destroyed | | |
+| L12 | Hook, then walk away and touch nothing | Each window expires in turn, the fight ends on its own, no stuck session | | |
+| L13 | Win a fight, then check XP | Up to +25% over the fish's base XP for a flawless run; weight, quality and sale price unchanged | | |
+| L14 | Change `ForcedEncounter` mid-fight | The fight in progress does not change | | |
+| L15 | Finish that fight, cast again | The next fight uses the new setting | | |
+| L16 | Two players in counter-pull at the same time | Independent fights, no crossed state | | |
+| L17 | Disconnect mid-fight, reconnect, cast | Clean session, no `busy` | | |
+| L18 | Play a whole fight on a controller | Every counter reachable on the stick and A/cross; no mashing needed | | |
+| L19 | FORCED `sonar_strike` (no module deployed) | Falls back to the legacy tension fight, one console line naming the downgrade | | |
+| L20 | Switch back to `EncounterMode = default` | Every fish returns to the legacy fight | | |
+
+### Encounter performance
+
+Same rule as section K: record the measured numbers, do not invent a target first.
+
+| # | Scenario | resmon ms (client) | resmon ms (server) | Notes |
+|---|---|---|---|---|
+| L-P1 | Idle, encounter mode forced, nobody fishing | | | |
+| L-P2 | One counter-pull fight in progress | | | |
+| L-P3 | Four counter-pull fights in progress | | | |
+| L-P4 | `profiler record 200` during one fight | | | attach the breakdown |
+
 ## Sign-off
 
 Every row Pass (or an explicit, justified N/A): `______`  ·  Date: `__________`
