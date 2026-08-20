@@ -742,3 +742,46 @@ html, body, #root {
     border-color: var(--warn);
   }
 }
+
+/* Encounter shell. Inherits the panel material, rail colour and radius from .hud-panel
+   so the encounters read as one product with the rest of the HUD. */
+.enc-panel { min-width: 22vw; }
+
+/* The cue leans along X by its own direction, so LEFT/RIGHT/DIVE are distinguishable
+   from motion and glyph alone -- never from colour. */
+.enc-stage {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 0.4vh;
+  padding: 0.6vh 0 0.9vh;
+}
+.enc-cue {
+  display: flex; align-items: center; gap: 0.6vw;
+  transform: translateX(calc(var(--lean) * 2.4vw));
+  transition: transform 140ms cubic-bezier(.2,.8,.2,1);
+}
+.enc-glyph { font-size: 2.6vh; line-height: 1; }
+.enc-cue-text { font-size: 1.35vh; letter-spacing: .04em; text-transform: uppercase; }
+.enc-key { margin-top: 0.2vh; }
+
+/* Shrinks to nothing as the counter window closes. Width is written by the component's
+   rAF loop straight to this node -- no React render is involved. */
+.enc-window { height: 0.5vh; }
+.enc-window-fill { background: var(--rail); width: 100%; transition: none; }
+
+.enc-line-fill { background: var(--warn); }
+
+.enc-outcome {
+  margin-top: 0.7vh; text-align: center;
+  font-size: 1.5vh; letter-spacing: .06em; text-transform: uppercase;
+}
+
+.enc-cue--left_run .enc-glyph,
+.enc-cue--right_run .enc-glyph { animation: enc-nudge 520ms ease-in-out infinite; }
+.enc-cue--dive .enc-glyph { animation: enc-sink 620ms ease-in-out infinite; }
+@keyframes enc-nudge { 0%,100% { transform: translateX(0); } 50% { transform: translateX(0.5vw); } }
+@keyframes enc-sink  { 0%,100% { transform: translateY(0); } 50% { transform: translateY(0.5vh); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .enc-cue { transition: none; }
+  .enc-cue .enc-glyph { animation: none; }
+}
