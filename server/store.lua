@@ -5,7 +5,7 @@ Store = {}
 -- (e.g. `degrade`) into rows seeded by an older version
 local staticEquipment = json.decode(json.encode(Config.Equipment))
 
-local SETTING_KEYS = { 'RateLimit', 'Timings', 'CastMaxDistance', 'Durability', 'RareLoot', 'DefaultWater', 'RequireZone', 'RodCanBreak', 'RequireAssembly' }
+local SETTING_KEYS = { 'RateLimit', 'Timings', 'CastMaxDistance', 'Durability', 'RareLoot', 'DefaultWater', 'RequireZone', 'RodCanBreak', 'RequireAssembly', 'EncounterMode', 'ForcedEncounter' }
 
 local function getSetting(key)
     local v = MySQL.scalar.await('SELECT `value` FROM zfishing_settings WHERE `key` = ?', { key })
@@ -32,6 +32,8 @@ function Store.Seed()
         putSetting('RequireZone', Config.RequireZone)
         putSetting('RodCanBreak', Config.RodCanBreak)
         putSetting('RequireAssembly', Config.RequireAssembly)
+        putSetting('EncounterMode', Config.EncounterMode)
+        putSetting('ForcedEncounter', Config.ForcedEncounter)
         putSetting(seededMark('settings'), true)
     end
     if getSetting(seededMark('zones')) == nil then

@@ -12,6 +12,10 @@ ConfigSchema.Settings = {
     RequireAssembly  = { type = 'boolean' },
     RequireZone      = { type = 'boolean' },
     DefaultWater     = { type = 'enum', values = ConfigSchema.WATER_TYPES },
+    -- Encounters is a shared script, and shared scripts load before server scripts, so
+    -- the registry is defined by the time this table is built.
+    EncounterMode    = { type = 'enum', values = Encounters.MODES },
+    ForcedEncounter  = { type = 'enum', values = Encounters.FORCEABLE },
     Timings          = { type = 'object', fields = {
         biteMin     = { type = 'number', min = 500, max = 60000 },
         biteMax     = { type = 'number', min = 500, max = 60000 },
@@ -51,7 +55,8 @@ function ConfigSchema.ValidateSetting(key, value)
     elseif schema.type == 'boolean' then
         return (value == true or value == false), nil
     elseif schema.type == 'enum' then
-        return schema.values[value] and value or nil, schema.values[value] and nil or 'unknown water type'
+        if schema.values[value] then return value end
+        return nil, 'unknown value for ' .. key
     elseif schema.type == 'object' then
         if type(value) ~= 'table' then return nil, 'Timings must be an object' end
         local t = {}
@@ -114,8 +119,15 @@ function ConfigSchema.ValidateFish(data)
         water[#water + 1] = w
     end
     for _, b in ipairs(data.baits or {}) do if type(b) == 'string' then baits[#baits + 1] = b end end
+    -- nil means "never configured" and resolves to the fallback. A present but
+    -- unregistered value is a hard error: silently dropping it would let an admin
+    -- believe a fish was assigned an encounter it never got.
+    if data.encounter ~= nil and not Encounters.IDS[data.encounter] then
+        return nil, 'unknown encounter'
+    end
     return { label = data.label, water = water, weight = { min = wmin, max = wmax },
-             rarity = data.rarity, price = price, baits = baits, behavior = data.behavior, xp = xp }
+             rarity = data.rarity, price = price, baits = baits, behavior = data.behavior, xp = xp,
+             encounter = data.encounter }
 end
 
 function ConfigSchema.ValidateEquipment(slot, data)
