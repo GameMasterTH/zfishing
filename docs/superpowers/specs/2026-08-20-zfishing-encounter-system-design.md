@@ -329,10 +329,19 @@ reply can resynchronise rather than desynchronise:
 encounter = { max = 40, window = 10000 },
 ```
 
-Sizing: counter-pull is the busiest encounter at roughly 20 actions across a ~30s
-fight; mindgame tops out at 9 turns; sonar at 5 strikes. 40 per 10s is about 4x
-headroom over the worst honest case, so network jitter and a double-tapped key cannot
-trip it.
+Sizing: counter-pull is by far the busiest encounter — a tier-5 fight is on the order
+of 28 counters plus fatigue reels across roughly 31 seconds; mindgame tops out at 9
+turns; sonar at 5 strikes. `ZUtil.MakeRateGate` is a **fixed** window, not a sliding
+one (`shared/util.lua:39`), so the real constraint is the busiest 10-second slice of a
+tier-5 counter-pull, not the whole-fight average.
+
+The implementation plan must compute that worst honest slice from the tier-5 table and
+set `max` to at least twice it. `40` is the starting proposal, not a verified figure —
+do not treat it as settled without doing the arithmetic against the final tier
+numbers.
+
+Flooding still cannot accelerate a catch regardless of the limit: `seq` must strictly
+advance, and every unit of progress is computed server-side.
 
 Flooding cannot accelerate a catch: `seq` must strictly advance, and every unit of
 progress is computed server-side from the server's own state.
@@ -369,11 +378,21 @@ identity guard, the `Config.RateLimit` accounting, `Rewards.GiveCatch` — is un
 
 ### 3.6.1 The XP bonus
 
-`server/encounter.lua` computes a single score from its own recorded counters:
+**Each encounter module reports its own `perfScore` in 0..1**, and a flawless fight
+must return exactly `1.0` in all three. A single shared formula does not work: only
+sonar has a PERFECT band, so a shared `perfect`-weighted expression would pay more XP
+for a flawless sonar fight than a flawless counter-pull — and under RANDOM the
+encounter is pure luck, so identical skill would earn different XP for no reason the
+player can see or influence.
 
-```lua
-perfScore = ZUtil.clamp((perf.hits - perf.misses + perf.perfect) / expectedActions, 0, 1)
-```
+| encounter | score |
+| --- | --- |
+| `counter_pull` | `1 - misses / maxMisses` |
+| `fish_mindgame` | `correctAnswers / totalTurnsTaken` |
+| `sonar_strike` | `perfectStrikes / requiredPasses` |
+
+Each is clamped to 0..1. Each reaches 1.0 on a flawless fight and 0 on the worst
+survivable one.
 
 It is passed to settlement in the existing context table
 (`Rewards.GiveCatch(src, fish, zone, { sessionId, identifier, perfScore })`) and
@@ -399,11 +418,28 @@ resource already uses:
 | `escape` | fish got away | too many misses / escape pressure threshold |
 | `timeout` | ran out of time | `expiresAt` passed with no terminal outcome |
 
-`snap` reaching `zfishing:claim` keeps its existing side effect: `Rig.breakLine` plus
-the `line_broke` client notification (`server/session.lua:269`).
-
 Encounter-internal failure detail (`bad_seq`, `stale_challenge`) never reaches reward
 logic. It is answered on the action callback and never becomes an outcome.
+
+**Both existing consumers of the failure reason read it from the client and must be
+rewired.** Today the reason arrives as the fifth argument of `zfishing:claim`, sent by
+the NUI:
+
+- `if reason == 'snap' and s.rigSlot then Rig.breakLine(...)` (`server/session.lua:269`)
+- `endFishing(body.reason == 'snap' and 'line_broke' or 'fish_escaped')`
+  (`client/minigame.lua:97`), where `body.reason` is what the NUI reported
+
+For an encounter session the client does not know the reason — the server does. Left
+as-is, an encounter snap would never destroy the line component, and `snap`, `escape`
+and `timeout` would all render to the player as "the fish got away". Three changes:
+
+1. `Rig.breakLine` keys off `s.encounter.outcome == 'snap'` for encounter sessions,
+   and off the client `reason` only for `legacy_tension`.
+2. A failed claim returns the authoritative outcome to the client:
+   `{ ok = true, fish = nil, outcome = 'snap' }`.
+3. `client/encounter.lua` renders the end-of-fight message from that returned
+   `outcome`, not from anything it computed itself. `client/minigame.lua` keeps its
+   existing `body.reason` behaviour for the legacy path.
 
 ### 3.8 Settings and persistence
 
@@ -457,6 +493,42 @@ end
 
 `nil` is valid and means "use the fallback". A present-but-unknown value is a hard
 validation error, not a silent drop.
+
+Note that `ValidateFish` returns a **table literal**, unlike `ValidateEquipment` which
+builds a `clean` local. The patch adds the field to that literal; it does not
+introduce the `clean` pattern here.
+
+### 3.9.1 Getting the pilot mapping onto a server that has already booted
+
+Adding `encounter` to `config/fish.lua` is, on its own, a **no-op on every existing
+server**. This is the single most likely way for this feature to ship and appear to do
+nothing:
+
+- `Store.Seed()` gates fish seeding on `getSetting('_seeded_fish')`
+  (`server/store.lua:45`). On a live server that marker already exists, so the new
+  static values are never inserted.
+- `Store.Load()` then does `if next(fish) then Config.Fish = fish end`
+  (`server/store.lua:80`) — a wholesale replacement of `Config.Fish` with DB rows that
+  have no `encounter` key.
+- The resolver therefore sees `fish.encounter == nil` for all ten fish and returns
+  `legacy_tension` forever, while every unit test passes because tests construct
+  `Config` directly.
+
+The repository has already solved this exact shape once, for equipment: `Store.Load`
+compares each DB row against a `staticEquipment` snapshot taken before load and
+backfills keys the row is missing, preserving admin edits and writing the result back
+(`server/store.lua:85-97`). Fish has no equivalent.
+
+**This design adds the same backfill for fish**, mirroring the equipment one. It is
+the existing convention and it does not require an operator to remember a manual step.
+
+That backfill only fills keys a row **lacks**, which creates one requirement on the
+admin UI: the Fish tab's legacy option must write `encounter = 'legacy_tension'`
+**explicitly**, never omit the key. Omitting it would make the backfill re-add the
+pilot encounter on the next boot and silently undo an operator's rollback.
+`legacy_tension` is a member of `Encounters.IDS`, so it validates and the resolver
+returns it directly. An absent `encounter` key therefore means exactly one thing:
+"never configured".
 
 ### 3.10 Client and NUI transport
 
@@ -867,7 +939,10 @@ Resolver suite (PART 25), explicitly:
 5-7. FORCED returns each of the three forceable encounters.
 8. An invalid `EncounterMode` falls back to `default`.
 9. An invalid `ForcedEncounter` falls back to `legacy_tension`.
-10. A client-supplied encounter preference in the cast payload is ignored.
+10. A forged `type` or `difficulty` field inside an action payload has no effect on
+    the frozen `s.encounter` — the server reads only its own copy. (The brief's
+    "client cannot request an encounter" is structural, not behavioural: no callback
+    in the contract accepts one, so it needs an assertion that can actually fail.)
 11. The resolved encounter is frozen into `sessions[src].encounter`.
 12. Changing the setting mid-session does not change an active session's encounter;
     the next cast picks up the new mode.
@@ -945,7 +1020,7 @@ stable before any encounter is built.
 | C | `fish_mindgame` — same |
 | D | `sonar_strike` — same, plus the parity fixture |
 | E | admin UI wired to the live persisted settings |
-| F | pilot fish mapping in `config/fish.lua` |
+| F | pilot fish mapping in `config/fish.lua`, **plus the `Store.Load` fish backfill of section 3.9.1** — without it the mapping is a no-op on any server that has already booted |
 | G | regression pass, docs, bundle rebuild, live checklist |
 
 ---
