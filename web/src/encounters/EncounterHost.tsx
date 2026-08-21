@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { useNuiEvent } from '../hooks/useNui'
 import CounterPull from './CounterPull'
 import FishMindgame from './FishMindgame'
+import SonarStrike from './SonarStrike'
 import type { EncounterMessage, Outcome } from './types'
 
 // Holds one encounter's live state at its own type. The single cast below is at the only
@@ -54,6 +55,12 @@ export default function EncounterHost({ msg }: { msg: EncounterMessage }) {
       return (
         <Live key="fish_mindgame" initial={msg.state} startedAt={msg.startedAt}>
           {(state, outcome) => <FishMindgame state={state} outcome={outcome} />}
+        </Live>
+      )
+    case 'sonar_strike':
+      return (
+        <Live key="sonar_strike" initial={msg.state} startedAt={msg.startedAt}>
+          {(state, outcome) => <SonarStrike state={state} outcome={outcome} />}
         </Live>
       )
     default:

@@ -53,7 +53,42 @@ export type MindgameState = {
   escapeThreshold: number
 }
 
+export type SonarDecoy = {
+  k: number
+  dir: 1 | -1
+  hold: number
+  duration: number
+  crossAt: number
+}
+
+// Matches server/encounter_sonar.lua's M.render. The timeline is intentionally public
+// because the browser has to draw it; the server owns the time at which a strike lands.
+export type SonarState = {
+  phaseId: number
+  attempt: number
+  maxAttempts: number
+  hits: number
+  requiredHits: number
+  misses: number
+  maxMisses: number
+  passStartsIn: number
+  passEndsIn: number
+  duration: number
+  hold: number
+  profile: 'DART' | 'HEAVY' | 'STALKER' | 'GHOST'
+  dir: 1 | -1
+  k: number
+  weakHalf: number
+  perfectHalf: number
+  target: number
+  decoy?: SonarDecoy
+  floatTier: 1 | 2 | 3
+  lastGrade?: 'perfect' | 'safe' | 'miss'
+  notReady?: boolean
+}
+
 // Discriminated, so `type` and `state` can only ever be narrowed together.
 export type EncounterMessage =
   | { type: 'counter_pull';  difficulty: number; state: CounterPullState; startedAt: number }
   | { type: 'fish_mindgame'; difficulty: number; state: MindgameState;    startedAt: number }
+  | { type: 'sonar_strike';  difficulty: number; state: SonarState;       startedAt: number }
