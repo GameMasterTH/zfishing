@@ -28,9 +28,32 @@ export type CounterPullState = {
   reelsLeft?: number
 }
 
-export type EncounterMessage = {
-  type: EncounterType
-  difficulty: number
-  state: CounterPullState
-  startedAt: number
+export type FishAction = 'RUN' | 'DIVE' | 'THRASH' | 'JUMP' | 'REST' | 'LANDING'
+
+// Exactly what server/encounter_mindgame.lua's M.render(enc, now) returns. Durations,
+// never timestamps, and no field naming the correct response.
+//
+// `progress`/`reads` is the single progress number: how tired the fish is AND how many
+// reads are left. There is deliberately no second stamina figure restating it.
+export type MindgameState = {
+  phaseId: number
+  phase: 'TURN' | 'LANDING'
+  cue: FishAction
+  nextCue?: FishAction
+  telegraphIn: number
+  /** answers are refused until this elapses -- the panel has to draw the wait */
+  windowOpensIn: number
+  windowClosesIn: number
+  /** present only when the fish is faking; always earlier than windowOpensIn */
+  switchIn?: number
+  progress: number
+  reads: number
+  linePct: number
+  pressure: number
+  escapeThreshold: number
 }
+
+// Discriminated, so `type` and `state` can only ever be narrowed together.
+export type EncounterMessage =
+  | { type: 'counter_pull';  difficulty: number; state: CounterPullState; startedAt: number }
+  | { type: 'fish_mindgame'; difficulty: number; state: MindgameState;    startedAt: number }

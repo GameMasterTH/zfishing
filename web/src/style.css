@@ -785,3 +785,38 @@ html, body, #root {
   .enc-cue { transition: none; }
   .enc-cue .enc-glyph { animation: none; }
 }
+
+/* Mindgame. Reuses the encounter shell; the telegraph, the shut state and the response
+   row are the new parts, because the fight is a decision rather than a direction. */
+.mg-panel { min-width: 26vw; }
+
+.mg-cue {
+  display: flex; align-items: center; justify-content: center; gap: 0.6vw;
+  padding: 0.8vh 0 0.6vh;
+}
+/* A fake flips visibly -- the change itself has to be perceptible, not just the result. */
+.mg-cue--faked .enc-glyph { animation: mg-flip 320ms ease-out; }
+@keyframes mg-flip {
+  0%   { transform: rotateX(90deg) scale(.8); opacity: .2; }
+  100% { transform: rotateX(0) scale(1); opacity: 1; }
+}
+
+/* The server scores an answer given now as a miss, so the panel has to say so. */
+.enc-window--shut .enc-window-fill { background: var(--rail); opacity: .55; }
+.mg-responses--shut { opacity: .38; filter: saturate(.4); }
+.mg-responses--shut .keycap { border-style: dashed; }
+
+.mg-responses {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 0.4vh 0.8vw; margin: 0.8vh 0 0.4vh;
+  transition: opacity 140ms linear, filter 140ms linear;
+}
+.mg-response { display: flex; align-items: center; gap: 0.45vw; }
+.mg-response-text { font-size: 1.2vh; letter-spacing: .03em; }
+
+.enc-risk-fill { background: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mg-cue--faked .enc-glyph { animation: none; }
+  .mg-responses { transition: none; }
+}
