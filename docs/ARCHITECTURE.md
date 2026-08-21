@@ -1943,10 +1943,10 @@ drawing both would be two bars restating one number.
 
 ### 12.12 Sonar Strike (`sonar_strike`)
 
-Sonar is the timing encounter: the fish's weak centre moves through a compact lane and a
-strike is graded only from server-held timeline state. D1 supplies the server module and
-the Lua/TypeScript parity fixture; it remains on the `encounter-sonar` branch until D2
-draws it. It must not be deployed alone, because registering the module makes it playable.
+Sonar is the timing encounter: the fish's weak centre moves through a compact NUI lane and
+a strike is graded only from server-held timeline state. D1's server model and D2's NUI
+ship together: the browser mirrors the committed 504-point Lua fixture and uses
+`requestAnimationFrame` only to move already-public pass state.
 
 The client sends only `strike`; it never sends `atMs`. A client that knew a perfect point
 at 1840ms could otherwise wait until 2400ms and submit 1840ms inside a permissive arrival
@@ -1977,7 +1977,7 @@ direction. `k` stays in `(-.5, 1)`, so it crosses the target exactly once. Profi
 
 Every hold receives seeded ±6% duration jitter. Without it, zero-hold DART, HEAVY and
 GHOST all cross at exactly `duration / 2`; players could reuse one learned clock. GHOST
-never hides the real fish (D2 must keep opacity at least 0.35). Its decoy has no weak band
+never hides the real fish (the NUI keeps opacity at least 0.35). Its decoy has no weak band
 and an independent `crossAt`: every easing curve reaches target at its own midpoint, so a
 decoy sharing the real timeline would cross at the same instant for every `k` and direction.
 The server enforces at least 550ms separation, beyond the largest safe band.
@@ -1992,12 +1992,13 @@ pins the future TypeScript port to Lua but does not itself prove the formula cor
 
 ## 13. Change history
 
-### Sonar Strike server half (Phase D1) — 2026-08-21
+### Sonar Strike (Phase D) — 2026-08-21
 
-`sonar_strike` now has a server-authoritative pass model, frozen per-pass compensation,
+`sonar_strike` has a server-authoritative pass model, frozen per-pass compensation,
 independent GHOST decoy timing, bounded safe/perfect/miss resolution, and a 504-sample
-cross-language fixture. No fish is configured for it, and it has not run in FiveM. This
-commit stays unmerged until D2 supplies the NUI and bridge mapping in the same branch.
+cross-language fixture. Its compact NUI mirrors that public timeline locally and submits
+only `strike`/`advance`; control 22 is the only gameplay input. Float tier changes clarity,
+not windows or hit count. No fish is configured for it, and it has not run in FiveM.
 
 ### The fish mindgame, and one Phase B correction (Phase C) — 2026-08-21
 

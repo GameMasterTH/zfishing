@@ -294,8 +294,8 @@ Same rule as section K: record the measured numbers, do not invent a target firs
 
 ## N. Encounter system — Sonar Strike (Phase D)
 
-Nothing in this section has been executed. D1 is server-only; every row requires D2's NUI
-before it can be run. Keep this branch unmerged until then.
+Nothing in this section has been executed. The NUI and server model now ship together;
+every row remains unticked until it is run in a live FiveM server.
 
 | # | Steps | Expected | Pass/Fail | Notes |
 |---|---|---|---|---|
