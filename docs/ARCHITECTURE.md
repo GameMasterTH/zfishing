@@ -1805,7 +1805,173 @@ rather than sliding.
 
 ---
 
+### 12.11 Fish Mindgame (`fish_mindgame`)
+
+The second encounter, and the deliberate opposite of counter-pull: difficulty here is
+knowing *what* to answer, never how fast. The fish telegraphs an action; the player picks
+one of four responses.
+
+| fish action | correct response | control | keyboard | controller |
+|---|---|---|---|---|
+| `RUN` | `give_line` | `34` INPUT_MOVE_LEFT_ONLY | A | stick left |
+| `DIVE` | `brace` | `33` INPUT_MOVE_DOWN_ONLY | S | stick down |
+| `THRASH` | `hold` | `35` INPUT_MOVE_RIGHT_ONLY | D | stick right |
+| `JUMP` | `give_line` | `34` | A | stick left |
+| `REST` | `reel` | `22` | SPACE | A / cross |
+| `LANDING` | `reel` | `22` | SPACE | A / cross |
+
+The responses are not directional, so their meaning is carried by the on-screen label
+beside each keycap rather than by the key's position. That is affordable here and not in
+counter-pull, because a turn is a considered choice with seconds to read, not a reflex.
+
+**`RUN` and `JUMP` share an answer on purpose.** They differ in what being *wrong* costs,
+not in what is right. Knowing the fish tells you how expensive the mistake you are about
+to make is; it is not rock-paper-scissors with five hands.
+
+| fish action | on correct | on wrong |
+|---|---|---|
+| `RUN` | progress +1 | line − `mistake` |
+| `DIVE` | progress +1 | line − `mistake × 1.5` |
+| `THRASH` | progress +1 | escape risk +1 |
+| `JUMP` | progress +1 | escape risk +2 |
+| `REST` | progress +1, line + `12 × reelDrain` | escape risk +1 |
+| `LANDING` | **success** | escape risk +1, progress −1 |
+
+**The shape of a turn.**
+
+```
+armTurn(now)
+ |
+ |<---------------- TELEGRAPH 1400ms, uniform ------------------>|
+ |                                                               |
+ |     a fake flips at +600ms; from there every client is         |
+ |     looking at the real action                                |
+ |                                                               |
+ |                  answers accepted from +1150ms (GRACE) -------|
+ |                                                               |
+ |                                      |<-- decision window --->|
+                                                                 |
+                                                           deadline
+```
+
+Two properties fall out of this and both are load-bearing.
+
+**Inside the window, timing carries no score at all.** The first accepted millisecond and
+the last are worth exactly the same. This is the encounter's identity.
+
+**An answer during the telegraph is a miss** — the same rule counter-pull applies to a
+pre-window press. That is fair only because the NUI draws a visibly shut window and
+dimmed responses for the whole telegraph (`.enc-window--shut`, `.mg-responses--shut`), so
+the panel says plainly that nothing is being taken yet. If that shut state is ever
+removed, the miss rule becomes unfair and has to go with it.
+
+`TELEGRAPH` is a constant rather than a tier field: a faking turn that ran longer than an
+honest one would be detectable with a stopwatch instead of by reading the fish.
+
+**Why the two encounters fake differently.** `counter_pull` flips its decoy *inside* the
+action window — there the feint punishing an early commitment is the mechanic, and with a
+700–1400ms window there is no long safe period to move the flip into. `fish_mindgame`
+flips during the telegraph, before any answer is accepted, because "timing carries no
+score" would otherwise be broken in the one place a player cannot see.
+
+The consequence, stated plainly so it is not read later as an oversight: **in the mindgame
+the fake is presentation, not protection.** `nextCue` ships with `cue` because the NUI
+must draw the flip, and it gives a modified client nothing it would not have had 550ms
+later anyway. The mindgame's defence against a scripted client is that the server holds
+the chain, the answer and the clock.
+
+**Behaviour chains.** Three of the four behaviours are fixed cycles, so a player can learn
+them; only `erratic` draws. This is the mechanism behind "knowing the fish is worth
+something".
+
+| behavior | chain | what a player learns |
+|---|---|---|
+| `steady_light` | RUN → REST → RUN → THRASH | most predictable; safe to learn on |
+| `steady_heavy` | DIVE → DIVE → REST | "catfish dives twice, then rests" |
+| `run_stop` | RUN → RUN → REST | long runs, then a reel opportunity |
+| `erratic` | weighted random incl. JUMP | cannot be pre-read; answer live |
+
+`nextAction` is the **only** function permitted to advance a chain, and it runs exactly
+once per turn. A decoy comes from `pickDecoy`, which draws from a flat list and touches no
+state. Drawing a decoy from `nextAction` — as the first draft did — advances `chainAt`, so
+any turn that happened to fake silently ate the fish's next real move and "dives twice
+then rests" became "dives once then rests".
+
+**Tiers.** `turns` is the read count; `decision` is thinking time in ms.
+
+| tier | turns | decision | line | escape | mistake | fake |
+|---|---|---|---|---|---|---|
+| 1 | 3 | 2400 | 100 | 3 | 30 | 0 |
+| 2 | 4 | 2200 | 100 | 3 | 30 | 0 |
+| 3 | 5 | 2000 | 90 | 3 | 30 | 0.10 |
+| 4 | 7 | 1800 | 85 | 3 | 30 | 0.20 |
+| 5 | 9 | 1600 | 80 | 3 | 30 | 0.25 |
+
+**`turns` is the tier, and nothing moves it.** Progress is an explicit counter: a correct
+read is always +1, a wrong answer costs a resource and never a read, so a fight costs
+exactly `tier.turns` correct reads for every behaviour and every rig in the game. An
+earlier draft made stamina the gate and multiplied the `REST` payoff by `reelDrain`; that
+landed a tier-5 fight in roughly six answers instead of nine, and fewer still with a good
+reel — deleting the encounter's content in the name of rewarding gear.
+
+What gear moves instead: `maxLine` (via `Encounters.LineMult`), the line a well-answered
+`REST` hands back (`12 × reelDrain`), the landing window (`decision × clamp(drain,1,1.5)`)
+and thinking time (`decision × (1 + greenZone)`). None of them is the read count.
+
+**Why a wrong `REST` costs escape risk.** Fictionally, a rest you fail to punish is a rest
+the fish gets to use. Mechanically it is what makes the machine terminate: every wrong
+answer now spends line or escape risk, so failures are bounded and the fight cannot be
+stalled indefinitely. A fumbled landing costs one risk and one read for the same reason —
+without it a player could second-wind at the net until the encounter expired.
+
+**The estimate is derived from that bound, not guessed.** At most
+`ceil(maxLine / mistake) - 1` line failures and `escape - 1` risk failures can happen
+without ending the fight, and at most `escape - 1` fumbled landings, each buying back one
+read and one landing turn. `M.build` sums those into a turn count and multiplies by
+`TELEGRAPH + decision`. Across all five tiers with the best gear in the game the result
+lands near 100s after `Encounter.Begin`'s 1.75× — inside the 120s clamp rather than on it,
+which is what stops a long honest fight from expiring mid-fight. `M20` in
+`tests/encounter_mindgame.test.lua` pins that.
+
+**One progress number, one bar.** The render carries `progress`/`reads` and no separate
+stamina figure: how tired the fish is and how many reads remain are the same fact, and
+drawing both would be two bars restating one number.
+
+---
+
 ## 13. Change history
+
+### The fish mindgame, and one Phase B correction (Phase C) — 2026-08-21
+
+`fish_mindgame` ships end to end: the server module (§12.11), per-encounter key maps in
+the client bridge, a NUI panel, and 33 new tests (20 module, 3 bridge, 10 mindgame UI,
+1 counter-pull UI). Nothing in `server/encounter.lua`, `server/session.lua` or the claim
+path changed — the module contract from Phase A carried it unmodified.
+
+**Still reachable only by an admin.** No fish carries an `encounter` field (Phase F), so
+DEFAULT resolves everything to `legacy_tension`. `EncounterMode = forced,
+ForcedEncounter = fish_mindgame` is the only way in. `sonar_strike` still downgrades to
+legacy via `Encounter.Playable`.
+
+**A Phase B HUD defect fixed along the way.** `CounterPull.tsx` had been drawing a
+"Mistakes n/m" caption over a bar whose length was line health — two different numbers in
+one row, so the bar contradicted its own caption mid-fight. It is now two rows, each
+pinned to its own number by a test, and `enc_line` was retargeted from "Mistakes" to
+"Line" so it labels the bar it was always drawn beside. The new `enc_cp_misses` carries
+the miss count. Counter-pull's Lua is untouched.
+
+**Three design errors caught in plan review, before any code was written.** Decoys were
+drawn with `nextAction()`, which advances `chainAt` — so any turn that faked ate the
+fish's next real move, destroying the behaviour chains the encounter is built on. Fakes
+showed a decoy while the server scored against the real action from the first
+millisecond, punishing an honest player for believing the UI. And `turns` was documented
+as the read count while a `REST` payoff multiplied by `reelDrain` let a tier-5 fight land
+in about six answers instead of nine, faster still with a good reel. Each is described
+where it matters in §12.11, because each was a plausible-looking design that had to be
+reasoned about rather than spotted.
+
+**Not run in FiveM.** Every claim here rests on 244 Lua tests and 89 web tests. Section L
+of `docs/testing/zfishing-live-e2e-checklist.md` carries the live checks, all unticked.
 
 ### Counter-Pull, the first encounter (Phase B) — 2026-08-21
 
