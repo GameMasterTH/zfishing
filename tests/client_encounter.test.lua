@@ -241,4 +241,16 @@ test('B13 an encounter with no key map polls nothing rather than sending nonsens
     equal(pressAndRead(34), nil, 'an unmapped encounter must send no action at all')
 end)
 
+test('B14 sonar maps only the reel control to strike', function()
+    loadBridge(happyServer())
+    biteAndHook('sonar_strike')
+    equal(pressAndRead(22), 'strike', 'one physical press asks the server to strike now')
+
+    for _, control in ipairs({ 33, 34, 35 }) do
+        loadBridge(happyServer())
+        biteAndHook('sonar_strike')
+        equal(pressAndRead(control), nil, 'sonar has no directional response to invent')
+    end
+end)
+
 H.run()

@@ -292,6 +292,24 @@ Same rule as section K: record the measured numbers, do not invent a target firs
 | M-P3 | Two mindgame and two counter-pull fights at once | | | |
 | M-P4 | `profiler record 200` during one mindgame fight | | | attach the breakdown |
 
+## N. Encounter system — Sonar Strike (Phase D)
+
+Nothing in this section has been executed. The NUI and server model now ship together;
+every row remains unticked until it is run in a live FiveM server.
+
+| # | Steps | Expected | Pass/Fail | Notes |
+|---|---|---|---|---|
+| N1 | FORCED sonar, tier 1 fish | Sonar lane opens; exactly two hits land the fish | | |
+| N2 | FORCED sonar, tier 5 fish | Five hits required; faster/narrower visual challenge | | |
+| N3 | Observe each behavior profile | DART, HEAVY, STALKER, and GHOST remain visually identifiable | | |
+| N4 | Land a PERFECT then a SAFE | Each advances hits by one; PERFECT earns stronger feedback | | |
+| N5 | Miss until max misses | Outcome is `escape`, never `snap` | | |
+| N6 | Tier 5 erratic fish | Decoy crosses target separately; real fish never disappears | | |
+| N7 | Upgrade float | Picture clarity changes; target width/hit count do not | | |
+| N8 | Tier 5: 20 strikes below 60ms ping | Record PERFECT count | | |
+| N9 | Tier 5: 20 strikes around 120ms ping | Record PERFECT count | | |
+| N10 | Tier 5: 20 strikes above 200ms ping | Record PERFECT count; use results to tune ±90ms floor | | |
+
 ## Sign-off
 
 Every row Pass (or an explicit, justified N/A): `______`  ·  Date: `__________`

@@ -816,6 +816,26 @@ html, body, #root {
 
 .enc-risk-fill { background: var(--danger); }
 
+/* Sonar keeps the world visible: a compact transparent lane, animated locally from the
+   server's frozen pass record. Neither band is a clickable browser control. */
+.sonar-panel { min-width: 27vw; }
+.sonar-status { font-size: 1.15vh; letter-spacing: .08em; opacity: .8; text-transform: uppercase; margin-bottom: .5vh; }
+.sonar-prompt { font-size: 1.2vh; font-weight: 700; letter-spacing: .08em; margin-bottom: .55vh; text-transform: uppercase; }
+.sonar-lane { position: relative; height: 7vh; overflow: hidden; border: 1px solid rgba(115, 211, 221, .45); background: rgba(12, 55, 69, .30); margin-bottom: .8vh; }
+.sonar-lane::before, .sonar-lane::after { content: ''; position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(159, 230, 237, .18); }
+.sonar-lane::before { top: 33%; } .sonar-lane::after { top: 66%; }
+.sonar-target { position: absolute; left: 50%; top: 0; bottom: 0; width: .28vw; transform: translateX(-50%); border-left: 2px solid var(--warn); border-right: 2px solid var(--warn); background: rgba(255, 205, 92, .12); }
+.sonar-fish { position: absolute; top: 50%; left: 0; will-change: transform; }
+.sonar-blip { display: block; font-size: 2.3vh; line-height: 1; text-shadow: 0 0 8px rgba(133, 236, 241, .9); color: #aaf4f7; }
+.sonar-band { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); border-radius: 999px; pointer-events: none; }
+.sonar-band--safe { height: 2.5vh; border: 1px solid rgba(114, 231, 177, .7); background: rgba(114, 231, 177, .14); }
+.sonar-band--perfect { height: 1.1vh; background: rgba(255, 205, 92, .65); }
+.sonar-fish--decoy { opacity: .55; filter: grayscale(.5); }
+.sonar-float--1 .sonar-fish--real { opacity: .72; }.sonar-float--2 .sonar-fish--real { opacity: .88; }.sonar-float--3 .sonar-fish--real { opacity: 1; }
+.sonar-float--1 .sonar-band--safe { opacity: .5; }.sonar-float--3 .sonar-band--safe { border-width: 2px; }
+.sonar-grade { text-align: center; margin-top: .55vh; font-size: 1.2vh; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.sonar-grade--perfect { color: var(--warn); }.sonar-grade--safe { color: var(--rail); }.sonar-grade--miss { color: var(--danger); }
+
 @media (prefers-reduced-motion: reduce) {
   .mg-cue--faked .enc-glyph { animation: none; }
   .mg-responses { transition: none; }

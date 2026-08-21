@@ -137,4 +137,76 @@ test('C11 a legacy session has no encounter callback surface', function()
     equal(H.CB['zfishing:encounter:act'](5, cast.sessionId, 'anything', 1, 'good').reason, 'no_encounter')
 end)
 
+-- ------------------------------------------------------------------ act meta
+
+-- Wraps fakeModule so a test can see exactly what the dispatcher handed it, without
+-- changing how the module behaves.
+local function watch(mod, seen)
+    local realAct, realBuild = mod.act, mod.build
+    mod.act = function(enc, action, now, meta)
+        seen.action, seen.now, seen.meta = action, now, meta
+        return realAct(enc, action, now)
+    end
+    mod.build = function(ctx)
+        seen.gear, seen.ctxPing = ctx.gear, ctx.ping
+        return realBuild(ctx)
+    end
+    return mod
+end
+
+test('C12 the dispatcher hands the module the acting player ping', function()
+    local seen = {}
+    local sid, cid = startEncounter(5, watch(fakeModule(), seen))
+    _G.__PING = 137
+    local r = H.CB['zfishing:encounter:act'](5, sid, cid, 1, 'good')
+    truthy(r.ok, tostring(r.reason))
+    equal(type(seen.meta), 'table', 'act must receive a meta table')
+    equal(seen.meta.ping, 137, 'and the ping must be the one the server measured')
+end)
+
+test('C13 meta is additive -- the three-parameter modules still work untouched', function()
+    -- fakeModule's own act takes three parameters, exactly as counter_pull and
+    -- fish_mindgame do. Lua drops the extra argument silently; this pins that the
+    -- dispatcher depends on nothing the older signature cannot provide.
+    local seen = {}
+    local sid, cid = startEncounter(5, watch(fakeModule(), seen))
+    local r = H.CB['zfishing:encounter:act'](5, sid, cid, 1, 'good')
+    truthy(r.ok)
+    equal(r.seq, 1)
+    equal(seen.action, 'good')
+    equal(type(seen.now), 'number', 'the raw server clock is still the third argument')
+end)
+
+test('C14 the first pass gets a ping measurement too, through ctx', function()
+    -- A pass fixes its own latency compensation when it is armed, and build arms the
+    -- first one. Without this the opening pass of every sonar fight would compensate
+    -- nothing while every later pass compensated correctly.
+    -- Booted inline rather than through startEncounter: loadSession runs installHost,
+    -- which resets __PING to its default, so the ping has to be set after the boot and
+    -- before the hook that arms the first pass.
+    local seen = {}
+    H.loadSession({ encounterMode = 'forced', forcedEncounter = 'counter_pull' })
+    Encounter.Register('counter_pull', watch(fakeModule(), seen))
+    local cast = H.CB['zfishing:cast'](5, 0.5)
+    truthy(cast.ok, tostring(cast.reason))
+    H.fireLatestTimer()
+    _G.__PING = 84
+    truthy(H.CB['zfishing:hook'](5, cast.sessionId).ok)
+    equal(seen.ctxPing, 84)
+end)
+
+test('C15 the fitted float reaches a module through ctx.gear', function()
+    -- startEncounter hardcodes a bare session, so boot this one directly to fit a rod.
+    local seen = {}
+    H.loadSession({ encounterMode = 'forced', forcedEncounter = 'counter_pull',
+                    rig = true, stats = { float = 'float_smart' } })
+    Encounter.Register('counter_pull', watch(fakeModule(), seen))
+    local cast = H.CB['zfishing:cast'](5, 0.5, 1)
+    truthy(cast.ok, tostring(cast.reason))
+    H.fireLatestTimer()
+    truthy(H.CB['zfishing:hook'](5, cast.sessionId).ok)
+    equal(seen.gear.float, 'float_smart',
+        'the float tier changes what the sonar NUI can draw, so a module must see it')
+end)
+
 H.run()

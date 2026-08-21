@@ -927,6 +927,7 @@ local function loadAllServerModulesAtBoot()
     -- their module directly and never walk the manifest.
     dofile('server/encounter_counter_pull.lua')
     dofile('server/encounter_mindgame.lua')
+    dofile('server/encounter_sonar.lua')
     dofile('server/progression.lua')
     dofile('server/rewards.lua')
     dofile('shared/rig_rules.lua')
@@ -940,6 +941,8 @@ test('G1 booting every server module performs no DB read/write and no host mutat
     loadAllServerModulesAtBoot()
     equal(#spy.sql, 0, 'no SQL may run at resource boot (Site-Agent-only DB boundary)')
     equal(#spy.host, 0, 'no host mutation (convar/process) may run at boot')
+    truthy(Encounter.MODULES.counter_pull and Encounter.MODULES.fish_mindgame and Encounter.MODULES.sonar_strike,
+        'every manifest-ordered encounter module must register at boot')
 end)
 
 test('G2 no server module ever issues schema DDL, even in the deferred data thread', function()

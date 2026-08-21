@@ -1673,7 +1673,9 @@ Two side effects that used to key off the client's reason now follow the server'
 outcome: `Rig.breakLine` on a snap, and the loss reason returned to the client so the
 player is told what actually happened instead of "the fish got away" for every outcome.
 
-Every encounter terminates in exactly one of `success`, `escape`, `snap`, `timeout`.
+The shared outcome vocabulary is `success`, `escape`, `snap`, `timeout`. A module uses
+the subset its gameplay can actually support: Counter-Pull and Mindgame can snap a line;
+Sonar has no line-management lever, so it uses `success`, `escape`, `timeout` only.
 Encounter-internal failures (`bad_seq`, `stale_challenge`) are answered on the action
 callback and never become outcomes.
 
@@ -1939,7 +1941,64 @@ drawing both would be two bars restating one number.
 
 ---
 
+### 12.12 Sonar Strike (`sonar_strike`)
+
+Sonar is the timing encounter: the fish's weak centre moves through a compact NUI lane and
+a strike is graded only from server-held timeline state. D1's server model and D2's NUI
+ship together: the browser mirrors the committed 504-point Lua fixture and uses
+`requestAnimationFrame` only to move already-public pass state.
+
+The client sends only `strike`; it never sends `atMs`. A client that knew a perfect point
+at 1840ms could otherwise wait until 2400ms and submit 1840ms inside a permissive arrival
+window. Instead the server evaluates `strikeAt = receivedAt - compensationMs`, where
+`compensationMs = clamp(ping / 2, 0, 200)` is frozen when each pass arms. Raw server time
+still decides expiry; compensated time decides a grade. The client cannot choose a rewind
+or pick a favourable past instant, though it can influence measured ping, hence both the
+cap and pre-pass sampling.
+
+A pass has a 700ms reacquire interval. A strike before `passStartAt` is a no-op with no
+score value, hit, miss, or consumed attempt: nothing is scored against something the UI
+was not showing. During the pass, `SAFE` and `PERFECT` each add one of `requiredHits`; a
+perfect adds score `1.0`, safe `0.7`, and a miss `0`. `maxAttempts = requiredHits +
+maxMisses - 1`, so resolution is bounded. Sonar deliberately has no `snap` and ignores
+`lineRating`: a line pool without a player-controlled line mechanic would be a fake
+failure axis. It reads float tier only for visual clarity.
+
+`Sonar.WeakAt` uses a monotone cubic over the normalized lane. With `u` over the moving
+part and `c = u - .5`, the centre is `f = .5 + (1-k)c + 4kc^3`, reversed for the opposite
+direction. `k` stays in `(-.5, 1)`, so it crosses the target exactly once. Profiles are:
+
+| behavior | profile | k | base hold | identity |
+|---|---|---:|---:|---|
+| `steady_light` | DART | -0.40 | 0 | accelerates through target |
+| `steady_heavy` | HEAVY | 0.50 | 0 | slow target crossing |
+| `run_stop` | STALKER | -0.30 | 35% | waits, then breaks |
+| `erratic` | GHOST | 0 | 0 | real echo plus false echo |
+
+Every hold receives seeded ±6% duration jitter. Without it, zero-hold DART, HEAVY and
+GHOST all cross at exactly `duration / 2`; players could reuse one learned clock. GHOST
+never hides the real fish (the NUI keeps opacity at least 0.35). Its decoy has no weak band
+and an independent `crossAt`: every easing curve reaches target at its own midpoint, so a
+decoy sharing the real timeline would cross at the same instant for every `k` and direction.
+The server enforces at least 550ms separation, beyond the largest safe band.
+
+Window widths are generated per pass from profile speed, not only tier. The linear input
+floor is ±240ms SAFE and ±90ms PERFECT; tests binary-search the actual cubic curve because
+the linear `halfWidth / targetSpeed` estimate overstates HEAVY's true window. The parity
+fixture samples 504 Lua points across all profiles, directions and three durations; it
+pins the future TypeScript port to Lua but does not itself prove the formula correct.
+
+---
+
 ## 13. Change history
+
+### Sonar Strike (Phase D) — 2026-08-21
+
+`sonar_strike` has a server-authoritative pass model, frozen per-pass compensation,
+independent GHOST decoy timing, bounded safe/perfect/miss resolution, and a 504-sample
+cross-language fixture. Its compact NUI mirrors that public timeline locally and submits
+only `strike`/`advance`; control 22 is the only gameplay input. Float tier changes clarity,
+not windows or hit count. No fish is configured for it, and it has not run in FiveM.
 
 ### The fish mindgame, and one Phase B correction (Phase C) — 2026-08-21
 

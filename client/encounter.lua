@@ -31,6 +31,11 @@ local KEYMAPS = {
         { action = 'hold',      control = 35 },
         { action = 'reel',      control = 22 },
     },
+    sonar_strike = {
+        -- Sonar is a single, semantic strike. Directional controls would imply the
+        -- client can steer a target it merely renders, so they deliberately do nothing.
+        { action = 'strike', control = 22 },
+    },
 }
 
 local function reset()
