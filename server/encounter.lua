@@ -66,7 +66,7 @@ local MAX_DEADLINE = 120000
 
 -- Builds the challenge. Called at hook time, not at cast: the type and tier were
 -- frozen at cast (session.lua), the fight state starts when the fight does.
-function Encounter.Begin(s, gear)
+function Encounter.Begin(s, gear, src)
     local mod = Encounter.MODULES[s.encounter.type]
     if not mod then return nil end
 
@@ -79,6 +79,9 @@ function Encounter.Begin(s, gear)
         fish       = s.fish,
         gear       = gear or {},
         now        = now,
+        -- The first pass fixes its latency compensation here, exactly as every later one
+        -- does from meta.ping. See ARCHITECTURE 12.12.
+        ping       = src and GetPlayerPing(src) or 0,
     })
 
     s.encounter.challengeId = s.id .. '#' .. math.random(100000, 999999)
@@ -114,10 +117,19 @@ end
 -- reward logic never sees an encounter-internal failure name.
 local OUTCOMES = { success = true, escape = true, snap = true, timeout = true }
 
-local function evaluate(s, action, now)
+-- `meta` carries per-action facts a module may need that are not encounter state. Today
+-- that is the acting player's ping, for `sonar_strike`: it is the first encounter whose
+-- score depends on WHEN an action arrived, so it compensates arrival time rather than
+-- trusting a client-reported moment.
+--
+-- Note the two clocks this creates in one call, deliberately. `now` here is the raw
+-- server clock, and it is what expiresAt and state.deadline are judged against, because
+-- the expiry backstop is about abandonment and must not be movable by a reported ping.
+-- A module that grades timing subtracts its own bounded compensation from `now`.
+local function evaluate(s, action, now, meta)
     local enc = s.encounter
     local mod = Encounter.MODULES[enc.type]
-    local res = mod.act(enc, action, now) or {}
+    local res = mod.act(enc, action, now, meta) or {}
 
     if res.outcome ~= nil and not OUTCOMES[res.outcome] then
         -- A module bug must not leak a made-up reason into settlement.
@@ -185,6 +197,6 @@ lib.callback.register('zfishing:encounter:act', function(src, sessionId, challen
     end
     enc.seq = seq
 
-    local res = evaluate(s, action, now)
+    local res = evaluate(s, action, now, { ping = GetPlayerPing(src) or 0 })
     return { ok = true, seq = enc.seq, state = res.render, outcome = enc.outcome }
 end)

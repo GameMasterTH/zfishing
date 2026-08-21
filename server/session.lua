@@ -214,6 +214,7 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
         state = 'waiting', fish = fish, bait = chosenBait, rod = rod,
         lineRating = stats and stats.lineRating or resolveLineRating(src, level),
         reelDrain = stats and stats.reelDrain or nil,
+        float = stats and stats.float or nil,
         rigSlot = rigSlot,
         -- type and difficulty are frozen at cast; the challenge state is built at hook
         encounter = { type = encType, mode = encMode, difficulty = fish.difficulty or 1 },
@@ -275,7 +276,8 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
             lineRating = s.lineRating,
             reelDrain  = s.reelDrain or 1.0,
             greenZone  = (Config.Equipment.rods[s.rod] or {}).greenZone or 0.0,
-        })
+            float      = s.float,
+        }, src)
     end
     return { ok = true, challengeId = challengeId, encounter = opening }
 end)

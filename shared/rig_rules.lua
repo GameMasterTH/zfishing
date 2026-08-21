@@ -32,6 +32,9 @@ function RigRules.ExtractStats(meta)
         reelDrain      = reel.drainRate or 1.0,
         lineRating     = line.rating or 10,
         hook           = hook,
+        -- The item id, not just its biteSpeed: sonar_strike draws a different picture per
+        -- float tier, and biteSpeed alone cannot identify which float is fitted.
+        float          = p.float,
         floatBiteSpeed = float.biteSpeed or 1.0,
     }
 end
