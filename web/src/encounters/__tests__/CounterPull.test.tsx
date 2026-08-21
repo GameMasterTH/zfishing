@@ -89,6 +89,16 @@ describe('CounterPull', () => {
     expect(posted.some((p) => p.event === 'encounterDone')).toBe(false)
   })
 
+  it('draws the line bar from linePct and the miss bar from misses', () => {
+    // These two used to share one row: a "Mistakes 2/5" caption over a line-health bar.
+    render(<CounterPull state={base({ linePct: 40, misses: 2, maxMisses: 4 })} outcome={null} />)
+    expect(document.querySelector('.cp-line')!.textContent).toBe('40%')
+    expect(document.querySelector('.cp-misses')!.textContent).toBe('2/4')
+    const style = (sel: string) => (document.querySelector(sel) as HTMLElement).style.width
+    expect(style('.enc-line-fill')).toBe('40%')
+    expect(style('.enc-risk-fill')).toBe('50%')
+  })
+
   it('never sends the server a timing value it could trust', () => {
     render(<CounterPull state={base()} outcome={null} />)
     act(() => { vi.advanceTimersByTime(3000) })
