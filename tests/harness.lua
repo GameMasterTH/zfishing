@@ -202,7 +202,11 @@ function H.loadSession(opts)
             return { name = 'fishing_rod_common' }, META
         end,
         isComplete = function() return opts.rig == true end,
-        stats = function() return { lineRating = 10, reelDrain = 1.0, hook = 'hook_4', floatBiteSpeed = 1.0 } end,
+        stats = function()
+            local base = { lineRating = 10, reelDrain = 1.0, hook = 'hook_4', floatBiteSpeed = 1.0 }
+            for k, v in pairs(opts.stats or {}) do base[k] = v end
+            return base
+        end,
         degrade = function() return { broke = {} } end,
         breakLine = function() calls.lineBroken = true end,
     }
