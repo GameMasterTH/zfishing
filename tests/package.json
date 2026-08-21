@@ -16,6 +16,7 @@
     "test:encounter-counter-pull": "node luarun.mjs tests/encounter_counter_pull.test.lua",
     "test:encounter-mindgame": "node luarun.mjs tests/encounter_mindgame.test.lua",
     "test:encounter-sonar": "node luarun.mjs tests/encounter_sonar.test.lua",
+    "gen:sonar-fixture": "node gen_sonar_fixture.mjs",
     "test:client-encounter": "node luarun.mjs tests/client_encounter.test.lua",
     "test:all": "npm run test:water && npm run test:water-preservation && npm run test:security && npm run test:encounter-resolver && npm run test:encounter-admin && npm run test:encounter-difficulty && npm run test:encounter-session && npm run test:encounter-action && npm run test:encounter-claim && npm run test:encounter-counter-pull && npm run test:encounter-mindgame && npm run test:encounter-sonar && npm run test:client-encounter"
   },

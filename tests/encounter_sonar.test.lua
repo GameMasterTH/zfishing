@@ -445,4 +445,33 @@ test('S21 the derived estimate fits inside the framework deadline, unclamped', f
     end
 end)
 
+-- --------------------------------------------------------------- parity fixture
+
+test('S22 the live timeline still matches the committed fixture', function()
+    dofile('tests/sonar_fixture.lua')
+    truthy(SONAR_FIXTURE and #SONAR_FIXTURE > 0, 'the fixture must be generated and committed')
+
+    local worst, worstAt = 0, nil
+    for _, s in ipairs(SONAR_FIXTURE) do
+        local got = Sonar.WeakAt({ duration = s.duration, hold = s.hold, k = s.k, dir = s.dir }, s.t)
+        local delta = math.abs(got - s.pos)
+        if delta > worst then worst, worstAt = delta, s end
+    end
+    truthy(worst < 1e-6, worstAt and
+        ('drifted at duration=%d k=%s dir=%d t=%d: fixture %s, live %s')
+            :format(worstAt.duration, tostring(worstAt.k), worstAt.dir, worstAt.t,
+                tostring(worstAt.pos), tostring(Sonar.WeakAt(worstAt, worstAt.t)))
+        or 'fixture drift')
+end)
+
+test('S23 the fixture covers every profile and both directions', function()
+    dofile('tests/sonar_fixture.lua')
+    local ks, dirs = {}, {}
+    for _, s in ipairs(SONAR_FIXTURE) do ks[s.k] = true; dirs[s.dir] = true end
+    local n = 0
+    for _ in pairs(ks) do n = n + 1 end
+    equal(n, 4, 'all four profile curves must be sampled, or a TS bug can hide in one')
+    truthy(dirs[1] and dirs[-1], 'and both directions')
+end)
+
 H.run()
