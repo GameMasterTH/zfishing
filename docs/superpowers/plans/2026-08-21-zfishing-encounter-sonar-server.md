@@ -20,13 +20,27 @@ Both must be non-zero. Phase C merged to `main` at `604b9d8`, where 244 Lua test
 
 ---
 
-## Why Phase D is split, and what D2 gets
+## Why Phase D is split, and what that split is *not*
 
 §9.3 wants `posAt` implemented twice — once in Lua, once in `web/src/engine/sonarTimeline.ts` — with a committed fixture proving they agree. D1 ships the Lua side and the fixture. D2 ships the TypeScript side, `SonarStrike.tsx`, and the bridge key map.
 
 The split is at the fixture because D2's real dependency is D1's *shipped* constants and fixture format, not this plan's description of them. Writing both now would mean guessing the interface between them, which is the failure Phases B and C avoided by writing each plan only after its predecessor's real code existed.
 
-At the end of D1, `sonar_strike` is registered, playable by the resolver, and **has no UI**. That is the same state `counter_pull` sat in after Phase A: reachable, tested, undrawn. `Encounter.Playable` will report it true, so **D1 must not be merged and left indefinitely** — an admin forcing `sonar_strike` between D1 and D2 gets a fight with no picture. Task 4 Step 2 adds a console warning covering exactly that gap.
+### D1 and D2 are one branch and one merge
+
+**`encounter-sonar` is not merged to `main` until D2 is done.** This is a split in planning and review granularity, not in integration.
+
+An earlier draft of this plan merged D1 on its own and printed a console warning that the encounter had no NUI. That is wrong, and the warning made it worse by dressing up an invalid state as a handled one. After D1, `Encounter.Playable('sonar_strike')` is true, so an admin setting `EncounterMode = forced, ForcedEncounter = sonar_strike` gets a real server-side fight with nothing drawn — an unwinnable, unreadable session on a live server. No log line fixes that.
+
+The alternative — a `clientReady = false` flag in the registry — buys nothing but framework complexity to model a state that only exists between two commits on one branch. Branch discipline is cheaper and leaves no artifact behind.
+
+```
+main
+ └── encounter-sonar
+      ├── D1: contract + module + fixture + docs   (this plan)
+      ├── D2: TS posAt + SonarStrike.tsx + bridge  (next plan)
+      └── full suite green ──► merge to main
+```
 
 ## Global Constraints
 
@@ -83,9 +97,36 @@ A second crossing would cost three things that buy nothing: `vTarget` stops bein
 | `run_stop` | `STALKER` | −0.30 | 0.35 × duration | sits still, then breaks |
 | `erratic` | `GHOST` | 0.00 | 0 | steady, but the picture lies |
 
-GHOST's specced "signal fades and returns" is implemented as an **opacity oscillation with a floor of 0.35 — the real fish is never invisible.** Hiding a strikeable target is the exact thing §12.11 forbids: a strike scored against a fish the UI was not drawing.
+**`hold` carries a seeded jitter of ±6% of the pass duration**, on every profile including the three whose base `hold` is zero. Without it, the same symmetry that breaks the decoy makes every pass of every zero-hold profile cross the target at exactly `duration / 2` — 1200ms at tier 5 for DART, HEAVY and GHOST alike. Their identities would then rest entirely on how fast the fish looks near the target and how wide the band is, never on *when* the opportunity arrives, and a player could learn one clock and reuse it across three profiles.
 
-GHOST's difficulty comes from a **decoy** instead, at tier ≥ 4: a second blip on its own `k`/`dir`, carrying no weak band. Striking while only the decoy is near the target is a MISS. The real fish is always on screen, so the player is never guessing blind — they are reading which of two things is real.
+Jitter is applied to `hold` rather than added as a separate `crossBias` field because `hold` already shifts the crossing, is already rendered, and already feeds `vTarget` — so the millisecond floor below absorbs it with no extra work. STALKER keeps its much larger base `hold`, so it stays the profile that visibly waits. is implemented as an **opacity oscillation with a floor of 0.35 — the real fish is never invisible.** Hiding a strikeable target is the exact thing §12.11 forbids: a strike scored against a fish the UI was not drawing.
+
+GHOST's difficulty comes from a **decoy** instead, at tier ≥ 4: a second blip carrying no weak band. Striking while only the decoy is over the target is a MISS. The real fish is always on screen, so the player is never guessing blind — they are reading which of two things is real.
+
+**The decoy needs its own crossing time, and this is not optional.** Every curve in the easing family crosses the target at `u = 0.5` — at `c = 0` both the `(1−k)c` and `4kc³` terms vanish, so `f = 0.5` for every `k`, and `1 − f = 0.5` too, so for every `dir` as well:
+
+```
+k = -0.40  dir = +1  ->  weakAt(0.5) = 0.500000000000
+k = +0.50  dir = -1  ->  weakAt(0.5) = 0.500000000000
+k = +0.30  dir = +1  ->  weakAt(0.5) = 0.500000000000        ... and so on, for all k
+```
+
+A decoy given only its own `k` and `dir`, sharing the pass's `startAt`, `hold` and `duration`, therefore crosses the target **at the same millisecond as the real fish, always**. `k` changes how it travels, never when it arrives. Under that design the decoy is decoration: there is no moment where striking it is wrong and striking the fish is right, so it cannot create a false opportunity at all.
+
+The decoy carries its own timeline instead:
+
+```lua
+decoy = { k, dir, hold = 0, duration = 2 * crossAt, crossAt }
+```
+
+`crossAt` is chosen per pass, at least `MIN_DECOY_SEPARATION = 550` ms from the real crossing, on whichever side the seed picks. Setting `hold = 0, duration = 2 * crossAt` makes the decoy's own midpoint land exactly on `crossAt`, which is what puts it over the target then. An early decoy finishes its run and leaves the lane — which is the "fades and returns" the spec asked for, delivered as motion rather than as opacity.
+
+550ms clears the widest SAFE window in the game (±384ms, tier-5 HEAVY) with room left for a player to see the two events as separate. Both sides always have room at the tiers where decoys exist:
+
+| tier | duration | real crossing | early window | late window |
+|---|---|---|---|---|
+| 4 | 2800 | ~1400 | 200–850 | 1950–2600 |
+| 5 | 2400 | ~1200 | 200–650 | 1750–2200 |
 
 ### D.4 The widths, re-derived in milliseconds
 
@@ -140,11 +181,72 @@ Resulting tier-5 half-widths (no rod bonus):
 
 Every window is now at or above the floor, and HEAVY keeps its specced identity: the narrowest *band* on screen, and still the most forgiving *timing*, because it is the slowest thing crossing the target.
 
+**`halfWidth / vTarget` is a linear approximation, and the test must not use it.** `vTarget` is the slope *at* the crossing; the curve is a cubic, so the true time to travel from the target out to the band edge differs. For `k > 0` the fish accelerates away from the centre, so the linear figure **overstates** the real window:
+
+| profile | SAFE linear | SAFE actual | PERFECT linear | PERFECT actual |
+|---|---|---|---|---|
+| `DART` | 240ms | 242.8ms | 90ms | 90.1ms |
+| `HEAVY` | 384ms | **353.4ms** | 144ms | 142.0ms |
+| `STALKER` | 240ms | 245.6ms | 90ms | 90.3ms |
+| `GHOST` | 240ms | 240.0ms | 90ms | 90.0ms |
+
+Every actual window still clears its floor, so the current balance holds. But an assertion written as `weakHalf / vTarget >= 240` proves nothing about the real window — it would stay green while a future change to `k`, a width, or a tier pushed the true window under the floor, and HEAVY already shows a 31ms gap between the two figures.
+
+So the **generator keeps the linear form** — it is a cheap, closed-form input to a balance knob — and the **test measures the curve**, binary-searching for the `t` at which `|weakAt(t) − TARGET|` equals each half-width and asserting the distance from the crossing. That is what makes "every profile keeps PERFECT at or above the floor" a proven claim rather than a restated assumption.
+
+### D.4a Compensation is frozen when the pass is armed
+
+The compensation is fixed **once, when the pass is armed**, and stored on the pass:
+
+```lua
+st.compensationMs = ZUtil.clamp(ping * 0.5, 0, MAX_COMPENSATION)   -- at armPass
+...
+strikeAt = now - st.compensationMs                                  -- at strike
+```
+
+Reading the ping at strike time instead would leave a bounded but real lever: a player shaping their connection — a lag switch, a saturated uplink — raises the server-observed ping, and the server then rewinds their strike by up to 200ms. They cannot pick the value, but they can push it, and they can push it *at the moment it pays*.
+
+Freezing removes the timing of that incentive. To move the compensation a player must degrade their connection *before* the pass is armed and hold it there — which also degrades the picture they are trying to read and the input they are trying to land. The lever stops pointing the useful way.
+
+A pass is armed in two places — once in `build`, once per resolved strike in `act` — so the ping has to reach both. `meta.ping` covers `act`; Task 1 adds `ctx.ping` to `build` for the first pass. The module never calls `GetPlayerPing` itself, which keeps it free of FiveM natives and testable without stubbing one.
+
+**State the threat model accurately.** An earlier draft of this plan claimed a modified client "can only ever arrive later, which makes strikes worse". That is too strong. The correct claim is narrower and still worth having:
+
+> A client cannot **choose** its compensation, cannot submit a moment, and cannot select a favourable instant in the past. It can influence the measured ping that feeds the compensation, which is why the value is capped, and why it is sampled before the pass rather than during it.
+
+### D.4b A strike before the pass is not a miss
+
+`INTERVAL = 700` ms sits between passes, and this plan's own description of it is "the fish leaves the lane and is reacquired. Nothing is strikeable here." Scoring a press during that window as a MISS contradicts the constraint at the top of this plan — it scores a strike against something the UI is not showing — in exactly the way Phase C's telegraph did before §12.11 fixed it.
+
+A strike arriving before `passStartAt` is therefore a **no-op**: no hit, no miss, no attempt consumed, and no score recorded. It is not an error either — the dispatcher has already taken the `seq`, and that is fine, because taking a sequence number costs the player nothing.
+
+The mechanism is that `mod.act` returns **no `value`** for that case. `evaluate` in `server/encounter.lua` already guards its accumulator with `if res.value ~= nil`, so a premature strike does not dilute `perfScore` either. The render carries `notReady = true` for that one response so D2 can say "not yet" rather than flash a miss.
+
+This also closes the stale-strike race for free: a strike meant for pass 1 that arrives after pass 2 is armed lands before pass 2's `passStartAt` and is ignored, rather than being graded against a timeline the player never saw.
+
+### D.4c On binding actions to a phase
+
+A reviewer of this plan proposed sending `phaseId` with every action and checking `phaseId == enc.state.phaseId` alongside `seq`, on the grounds that `seq` answers "which action is this?" while `phaseId` answers "which state was this meant for?" — different invariants, and that is correct in general.
+
+The specific race raised was: a strike is accepted, the next pass arms, and the previous pass's NUI timer then fires an `advance` whose `seq` happens to be valid. **That one is already closed**, by the dispatcher's existing guard:
+
+```lua
+if action == 'advance' then
+    if type(enc.state.deadline) ~= 'number' or now < enc.state.deadline then
+        return { ok = false, reason = 'bad_action', seq = enc.seq }
+    end
+```
+
+A freshly armed pass has a deadline far in the future, so a stale `advance` is rejected. And the stale-*strike* half is closed by D.4b above. Between them, no stale action can score against a phase it was not aimed at.
+
+`phaseId` binding is still the more explicit statement of the invariant — today it is emergent from two separate guards rather than checked once. But it changes the wire signature of `zfishing:encounter:act`, the client bridge, and every encounter test, for hardening with no currently reachable hole behind it. **It is recorded as a cross-encounter task, not folded into D1**, alongside the device-aware keycap from Phase B.
+
 ### D.5 Deliberate deviations from §6
 
 | §6 says | this plan does | why |
 |---|---|---|
-| strike payload carries `passIndex`, rejected as `stale_pass` | omitted; `seq` is the staleness axis | `seq != enc.seq + 1` already rejects every stale, replayed and fabricated action. A second staleness axis is a second source of truth with no extra security. |
+| strike payload carries `passIndex`, rejected as `stale_pass` | omitted; see D.4c | `seq` plus the `advance` deadline guard plus D.4b's not-ready rule leave no reachable stale-action hole. A `phaseId` binding is the cleaner statement of the invariant and is recorded as a cross-encounter task, because it changes the wire signature of all three encounters. |
+| `line <= 0 -> snap`, and `lineRating` matters everywhere | sonar uses a subset of the outcome vocabulary, and `lineRating` has no role in it | See the row below. The shared vocabulary is `success / escape / snap / timeout`; a module may use a subset. Not every encounter has to consume every piece of gear — sonar reads the float instead. |
 | client may send `clientAtMs` for telemetry | omitted | Nothing consumes it. A field that is written and never read is not telemetry, it is a field a future reader has to prove is unused. |
 | `line <= 0 -> snap` is a sonar outcome | sonar has one failure axis: `misses` | With `maxMisses` 2–3 and any sane line pool, escape always fires first — `snap` is unreachable. Inventing damage numbers to make it reachable adds an axis the player cannot manage: there is nothing to give in sonar. Sonar's outcomes are `success`, `escape`, `timeout`. |
 | `pass.speed`, `pass.weakOffset` | dropped | `speed` over-determines the pace `duration` already sets; `weakOffset` is indistinguishable from moving the fish. |
@@ -186,7 +288,9 @@ Two small edits to shared files, done together because neither is worth its own 
 - Modify: `tests/encounter_action.test.lua`
 
 **Interfaces:**
-- Produces: `mod.act(enc, action, now, meta)` where `meta = { ping = <number> }`; `ctx.gear.float` in `mod.build`, a float item id string or `nil`.
+- Produces: `mod.act(enc, action, now, meta)` where `meta = { ping = <number> }`; `ctx.ping` in `mod.build`, the same measurement for the first pass; `ctx.gear.float`, a float item id string or `nil`.
+
+A pass is armed in `build` once and in `act` thereafter, and each arming fixes its own latency compensation (D.4a), so the ping has to reach both entry points. Neither value is client-supplied and neither module that exists today reads either.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -208,7 +312,7 @@ local function watch(mod, seen)
         return realAct(enc, action, now)
     end
     mod.build = function(ctx)
-        seen.gear = ctx.gear
+        seen.gear, seen.ctxPing = ctx.gear, ctx.ping
         return realBuild(ctx)
     end
     return mod
@@ -237,7 +341,17 @@ test('C13 meta is additive -- the three-parameter modules still work untouched',
     equal(type(seen.now), 'number', 'the raw server clock is still the third argument')
 end)
 
-test('C14 the fitted float reaches a module through ctx.gear', function()
+test('C14 the first pass gets a ping measurement too, through ctx', function()
+    -- A pass fixes its own latency compensation when it is armed, and build arms the
+    -- first one. Without this the opening pass of every sonar fight would compensate
+    -- nothing while every later pass compensated correctly.
+    local seen = {}
+    _G.__PING = 84
+    startEncounter(5, watch(fakeModule(), seen))
+    equal(seen.ctxPing, 84)
+end)
+
+test('C15 the fitted float reaches a module through ctx.gear', function()
     -- startEncounter hardcodes a bare session, so boot this one directly to fit a rod.
     local seen = {}
     H.loadSession({ encounterMode = 'forced', forcedEncounter = 'counter_pull',
@@ -258,7 +372,7 @@ end)
 node tests/luarun.mjs tests/encounter_action.test.lua
 ```
 
-Expected: C12 fails (`seen.meta` is nil) and C14 fails (`seen.gear.float` is nil). C13 passes already — that is the point of it.
+Expected: C12 fails (`seen.meta` is nil), C14 fails (`seen.ctxPing` is nil) and C15 fails (`seen.gear.float` is nil). C13 passes already — that is the point of it.
 
 - [ ] **Step 3: Pass the ping into the module**
 
@@ -295,6 +409,37 @@ and at its one call site inside the `zfishing:encounter:act` callback:
     local res = evaluate(s, action, now, { ping = GetPlayerPing(src) or 0 })
 ```
 
+`Encounter.Begin` arms the first pass, so it needs the same measurement. Append `src` to
+its signature — nothing else calls it — and put the ping in the build context:
+
+```lua
+function Encounter.Begin(s, gear, src)
+```
+
+```lua
+    local state, estimate = mod.build({
+        difficulty = s.encounter.difficulty,
+        seed       = math.random(1, 2147483647),
+        fish       = s.fish,
+        gear       = gear or {},
+        now        = now,
+        -- The first pass fixes its latency compensation here, exactly as every later one
+        -- does from meta.ping. See ARCHITECTURE 12.12.
+        ping       = src and GetPlayerPing(src) or 0,
+    })
+```
+
+and pass it at the one call site, in `server/session.lua`'s `zfishing:hook` handler:
+
+```lua
+        challengeId, opening = Encounter.Begin(s, {
+            lineRating = s.lineRating,
+            reelDrain  = s.reelDrain or 1.0,
+            greenZone  = (Config.Equipment.rods[s.rod] or {}).greenZone or 0.0,
+            float      = s.float,
+        }, src)
+```
+
 - [ ] **Step 4: Surface the fitted float**
 
 In `shared/rig_rules.lua`, `ExtractStats` already returns the hook item id verbatim. Add the float the same way — the float's *tier* changes what the sonar NUI may draw, and `biteSpeed` alone cannot identify it:
@@ -309,17 +454,15 @@ In `shared/rig_rules.lua`, `ExtractStats` already returns the hook item id verba
     }
 ```
 
-In `server/session.lua`, the cast handler stores selected stats onto the session near line 215. Add the float beside `reelDrain`:
+In `server/session.lua`, the cast handler stores selected stats onto the session record near line 215. Add the float beside `reelDrain`:
 
 ```lua
         float = stats and stats.float or nil,
 ```
 
-and in the `zfishing:hook` handler's `Encounter.Begin` gear table near line 275:
+The gear table that carries it into `Encounter.Begin` was already updated in Step 3.
 
-```lua
-            float      = s.float,
-```
+Note what is deliberately *not* done here: `src` is not stored on the session record. The comment at the top of that record explains why `identifier` exists — a src can belong to somebody else by the time a stored one is read. The ping is sampled at the two moments a src is known to be live and passed in, rather than kept.
 
 - [ ] **Step 5: Run the suite**
 
@@ -327,7 +470,7 @@ and in the `zfishing:hook` handler's `Encounter.Begin` gear table near line 275:
 node tests/luarun.mjs tests/encounter_action.test.lua
 ```
 
-Expected: all pass, three more than before.
+Expected: all pass, four more than before.
 
 - [ ] **Step 6: Re-run every suite**
 
@@ -335,7 +478,7 @@ Expected: all pass, three more than before.
 cd tests && npm run test:all
 ```
 
-Expected: 12 suites, 247 tests, exit 0. `counter_pull` and `fish_mindgame` must be untouched and green — if either moved, the change was not additive.
+Expected: 12 suites, 248 tests, exit 0. `counter_pull` and `fish_mindgame` must be untouched and green — if either moved, the change was not additive.
 
 - [ ] **Step 7: Commit**
 
@@ -356,7 +499,9 @@ git commit -m "feat: hand encounter modules the acting player's ping and fitted 
 **Interfaces:**
 - Consumes: `Encounter.Register`, `ctx = { difficulty, seed, fish, gear, now }`, `meta = { ping }`, `ZUtil.clamp`.
 - Produces: `mod.actions = { strike = true }`; `Sonar.WeakAt(pass, t)` exported on a module-level `Sonar` table so Task 3's generator can sample it; render payload
-  `{ phaseId, attempt, maxAttempts, hits, requiredHits, misses, maxMisses, passStartsIn, passEndsIn, duration, hold, profile, dir, k, weakHalf, perfectHalf, target, decoy?, floatTier, lastGrade? }`.
+  `{ phaseId, attempt, maxAttempts, hits, requiredHits, misses, maxMisses, passStartsIn, passEndsIn, duration, hold, profile, dir, k, weakHalf, perfectHalf, target, decoy?, floatTier, lastGrade?, notReady? }`,
+  where `decoy = { k, dir, hold, duration, crossAt }` and `notReady` appears only on the
+  response to a strike the pass had not opened for yet (D.4b).
 
 **Note on what the render may carry.** Unlike `counter_pull`'s `required` and `fish_mindgame`'s answer, the sonar timeline is *not* a secret — the NUI cannot draw the fight without it. What the player is being tested on is the moment they press, and that moment is measured on arrival. So the payload carries the whole pass record and hides nothing.
 
@@ -394,6 +539,8 @@ local function start(opts)
                                   forcedEncounter = 'sonar_strike',
                                   rig = opts.rig, stats = opts.stats })
         dofile('server/encounter_sonar.lua')
+        -- Set before the hook, because a pass fixes its compensation when it is armed.
+        _G.__PING = opts.ping or 0
         local cast = H.CB['zfishing:cast'](5, 0.5, opts.rig and 1 or nil)
         truthy(cast.ok, tostring(cast.reason))
         H.fireLatestTimer()
@@ -407,9 +554,10 @@ local function start(opts)
     return g
 end
 
--- Acts `offset` ms after the render was taken, at the given ping.
+-- Acts `offset` ms after the render was taken. `ping` here is the ping AT STRIKE TIME,
+-- which must not change the grade -- the compensation was fixed when the pass was armed.
 local function act(g, action, offset, ping)
-    _G.__PING = ping or 0
+    if ping ~= nil then _G.__PING = ping end
     _G.__NOW = g.at + (offset or 0)
     g.seq = g.seq + 1
     local res = H.CB['zfishing:encounter:act'](5, g.sid, g.cid, g.seq, action)
@@ -434,6 +582,16 @@ local function safeOffset(g)
     local s = g.last
     local d = (s.perfectHalf + s.weakHalf) * 0.5
     return perfectOffset(g) + d * (s.duration - s.hold) / (1 - s.k)
+end
+
+-- Settles the catch and returns the score the fight earned. The act callback returns
+-- { ok, seq, state, outcome } and no score of its own, so the grade values (PERFECT 1.0,
+-- SAFE 0.7, MISS 0) are only observable here -- which is also the only place they matter.
+local function scoreOf(g)
+    local claim = H.CB['zfishing:claim'](5, g.sid, 0, true)
+    truthy(claim.ok, tostring(claim.reason))
+    equal(g.calls.give, 1, 'the catch was committed once')
+    return g.calls.ctx.perfScore
 end
 
 test('S1 the hook answer opens pass 1 with a full timeline and no hits', function()
@@ -494,31 +652,69 @@ end)
 test('S7 ping compensation moves a late strike back onto the target', function()
     -- The same real-world timing, sent by two players on different connections. The
     -- laggy one arrives later in server time; compensation is what makes them equal.
-    local sharp = start({ difficulty = 5, seed = 7 })
-    local sharpRes = act(sharp, 'strike', perfectOffset(sharp), 0)
+    local sharp = start({ difficulty = 5, seed = 7, ping = 0 })
+    local sharpRes = act(sharp, 'strike', perfectOffset(sharp))
 
-    local laggy = start({ difficulty = 5, seed = 7 })
-    local laggyRes = act(laggy, 'strike', perfectOffset(laggy) + 90, 180)   -- 180/2 = 90ms back
+    local laggy = start({ difficulty = 5, seed = 7, ping = 180 })
+    local laggyRes = act(laggy, 'strike', perfectOffset(laggy) + 90)   -- 180/2 = 90ms back
 
     equal(sharpRes.state.lastGrade, 'perfect')
     equal(laggyRes.state.lastGrade, 'perfect',
         'a 180ms player striking at the same real moment must be graded the same')
 end)
 
-test('S8 compensation is bounded, so a huge reported ping cannot buy a better grade', function()
-    local g = start({ difficulty = 5, seed = 7 })
-    -- 2000ms of ping would be 1000ms of compensation if it were unbounded; the cap is 200.
-    local res = act(g, 'strike', perfectOffset(g) + 900, 2000)
+test('S8 compensation is bounded, so a huge ping cannot buy a better grade', function()
+    -- 2000ms of ping would be 1000ms of rewind if it were unbounded; the cap is 200.
+    local g = start({ difficulty = 5, seed = 7, ping = 2000 })
+    local res = act(g, 'strike', perfectOffset(g) + 900)
     equal(res.state.lastGrade, 'miss',
         'MAX_COMPENSATION must cap the rewind, or ping becomes a cheat surface')
+end)
+
+test('S8b compensation is fixed when the pass arms, not read when the strike lands', function()
+    -- The lever this closes: a player who shapes their connection could otherwise spike
+    -- the measured ping at the instant it pays and be handed up to 200ms of rewind.
+    local honest = start({ difficulty = 5, seed = 8, ping = 20 })
+    local honestRes = act(honest, 'strike', perfectOffset(honest) + 170)
+
+    local spiker = start({ difficulty = 5, seed = 8, ping = 20 })
+    local spikerRes = act(spiker, 'strike', perfectOffset(spiker) + 170, 400)  -- spikes on send
+
+    equal(honestRes.state.lastGrade, spikerRes.state.lastGrade,
+        'a ping spike at strike time must change nothing at all')
 end)
 
 test('S9 a strike is never graded against a client-supplied moment', function()
     -- The action is a bare string. There is no argument the client could put a time in.
     local g = start({ difficulty = 5 })
-    local res = act(g, 'strike', g.last.passStartsIn + 1)
+    local res = act(g, 'strike', perfectOffset(g) + 100000)
     equal(res.state.lastGrade, 'miss', 'and it is graded on arrival, not on intent')
     equal(res.state.clientAtMs, nil, 'no client time is echoed back either')
+end)
+
+test('S9b a strike before the fish is on the lane costs nothing at all', function()
+    -- INTERVAL is the reacquire gap. Nothing is drawn there, so nothing may be scored
+    -- there -- the same rule ARCHITECTURE 12.11 states for the mindgame telegraph.
+    local g = start({ difficulty = 5 })
+    local before = g.last.attempt
+    local res = act(g, 'strike', 10)                 -- well inside the gap
+    truthy(res.ok)
+    equal(res.state.notReady, true, 'the NUI is told to say "not yet"')
+    equal(res.state.hits, 0)
+    equal(res.state.misses, 0, 'above all: not a miss')
+    equal(res.state.attempt, before, 'and the attempt is not consumed')
+
+    -- The pass is still live and can still be won.
+    equal(act(g, 'strike', perfectOffset(g)).state.lastGrade, 'perfect')
+end)
+
+test('S9c a premature strike does not dilute the score either', function()
+    local g = start({ difficulty = 1 })
+    act(g, 'strike', 10)                             -- not ready, returns no value
+    local res
+    repeat res = act(g, 'strike', perfectOffset(g)) until res.outcome
+    equal(res.outcome, 'success')
+    equal(scoreOf(g), 1.0, 'a press the game refused is not an action the player took')
 end)
 
 test('S10 reaching requiredHits wins, and never needs more than the tier says', function()
@@ -574,23 +770,51 @@ test('S13 sonar never snaps a line -- misses are its only failure axis', functio
     equal(res.state.linePct, nil, 'and sonar does not draw a line bar at all')
 end)
 
-test('S14 every profile keeps PERFECT at or above the millisecond floor, at every tier', function()
+-- The TRUE half-window, in ms: how long the weak centre actually takes to travel from the
+-- target out to `half`, found on the curve rather than from its slope at the crossing.
+-- The linear figure halfWidth/vTarget overstates this for k > 0 -- at tier-5 HEAVY by
+-- 31ms -- so asserting on it would let a future tuning change slip a real window under
+-- the floor while the test stayed green.
+local function trueWindowMs(pass, half)
+    local travel = pass.duration - pass.hold
+    local lo, hi = 0.5, 1.0
+    for _ = 1, 60 do
+        local mid = (lo + hi) * 0.5
+        local c = mid - 0.5
+        local f = 0.5 + (1 - pass.k) * c + 4 * pass.k * c * c * c
+        if f - 0.5 < half then lo = mid else hi = mid end
+    end
+    return (lo - 0.5) * travel
+end
+
+test('S14 every profile keeps both windows above the millisecond floor, at every tier', function()
     -- The whole point of the per-pass floor: at tier 5 three of four profiles would
-    -- otherwise put PERFECT inside the lag error budget.
+    -- otherwise put PERFECT inside the lag error budget -- STALKER at about 36ms.
     for tier = 1, 5 do
         for _, behavior in ipairs({ 'steady_light', 'steady_heavy', 'run_stop', 'erratic' }) do
             local g = start({ difficulty = tier, behavior = behavior })
             local s = g.last
-            local vTarget = (1 - s.k) / (s.duration - s.hold)
-            local perfectMs = s.perfectHalf / vTarget
-            local weakMs = s.weakHalf / vTarget
+            local pass = { duration = s.duration, hold = s.hold, k = s.k, dir = s.dir }
+            local perfectMs = trueWindowMs(pass, s.perfectHalf)
+            local weakMs = trueWindowMs(pass, s.weakHalf)
             truthy(perfectMs >= 89.5,
-                ('tier %d %s: PERFECT is only %dms'):format(tier, behavior, perfectMs))
+                ('tier %d %s: PERFECT is only %.1fms'):format(tier, behavior, perfectMs))
             truthy(weakMs >= 239.5,
-                ('tier %d %s: SAFE is only %dms'):format(tier, behavior, weakMs))
+                ('tier %d %s: SAFE is only %.1fms'):format(tier, behavior, weakMs))
             truthy(s.perfectHalf < s.weakHalf)
         end
     end
+end)
+
+test('S14b the true window and the linear estimate genuinely differ', function()
+    -- Guards the guard: if trueWindowMs ever collapses to the linear form, S14 quietly
+    -- stops testing anything the old assertion did not. HEAVY is where they diverge most.
+    local g = start({ difficulty = 5, behavior = 'steady_heavy' })
+    local s = g.last
+    local pass = { duration = s.duration, hold = s.hold, k = s.k, dir = s.dir }
+    local linear = s.weakHalf / ((1 - s.k) / (s.duration - s.hold))
+    truthy(linear - trueWindowMs(pass, s.weakHalf) > 15,
+        'the linear estimate must still be measurably optimistic for k > 0')
 end)
 
 test('S15 each behaviour picks its own profile', function()
@@ -603,9 +827,28 @@ test('S15 each behaviour picks its own profile', function()
     equal(profileOf('erratic'), 'GHOST')
 end)
 
-test('S16 the stalker holds still before it breaks, and nobody else does', function()
-    truthy(start({ difficulty = 5, behavior = 'run_stop' }).last.hold > 0)
-    equal(start({ difficulty = 5, behavior = 'steady_light' }).last.hold, 0)
+test('S16 the stalker waits, and waits far longer than jitter alone explains', function()
+    for seed = 1, 20 do
+        local stalker = start({ difficulty = 5, behavior = 'run_stop', seed = seed }).last
+        local dart = start({ difficulty = 5, behavior = 'steady_light', seed = seed }).last
+        truthy(stalker.hold > dart.hold + 300,
+            ('seed %d: stalker held %dms, dart %dms'):format(seed, stalker.hold, dart.hold))
+        truthy(dart.hold <= 0.06 * dart.duration + 1,
+            ('a zero-hold profile drifted %dms, past the jitter bound'):format(dart.hold))
+    end
+end)
+
+test('S16b passes do not all present the opportunity on the same clock', function()
+    -- Without the hold jitter every zero-hold profile crosses at exactly duration/2, so
+    -- DART, HEAVY and GHOST would share one timing and a player could learn it once.
+    local seen = {}
+    for seed = 1, 25 do
+        local s = start({ difficulty = 5, behavior = 'steady_light', seed = seed }).last
+        seen[s.hold + (s.duration - s.hold) * 0.5] = true
+    end
+    local n = 0
+    for _ in pairs(seen) do n = n + 1 end
+    truthy(n > 5, ('25 passes produced only %d distinct crossing times'):format(n))
 end)
 
 test('S17 the weak centre crosses the target exactly once per pass', function()
@@ -634,6 +877,40 @@ test('S18 a decoy appears only at tier 4+ on an erratic fish, and carries no wea
     truthy(d.k ~= nil and d.dir ~= nil, 'but the NUI still needs enough to draw it')
 end)
 
+test('S18b a decoy crosses the target well away from the real fish, every time', function()
+    -- Without this the decoy is decoration. Every curve in the family crosses at the
+    -- midpoint of its own travel, so a decoy that shared the pass's timing would be over
+    -- the target at the SAME millisecond as the fish no matter what k and dir it got --
+    -- there would be no moment at which striking it was the wrong choice.
+    local worst = math.huge
+    for tier = 4, 5 do
+        for seed = 1, 30 do
+            local g = start({ difficulty = tier, behavior = 'erratic', seed = seed })
+            local s = g.last
+            truthy(s.decoy, 'tier 4+ erratic must always carry one')
+            local realCross = s.hold + (s.duration - s.hold) * 0.5
+            local gap = math.abs(s.decoy.crossAt - realCross)
+            if gap < worst then worst = gap end
+            truthy(s.decoy.crossAt > 0 and s.decoy.crossAt < s.duration,
+                ('tier %d seed %d: the decoy must cross while the pass is running, at %d')
+                    :format(tier, seed, s.decoy.crossAt))
+        end
+    end
+    truthy(worst >= 550,
+        ('the closest decoy came within %dms of the real crossing'):format(worst))
+end)
+
+test('S18c the decoy carries its own timeline, not the pass timing', function()
+    local s = start({ difficulty = 5, behavior = 'erratic', seed = 3 }).last
+    equal(s.decoy.hold, 0)
+    equal(s.decoy.duration, 2 * s.decoy.crossAt,
+        'hold 0 with duration 2*crossAt is what puts its midpoint on crossAt')
+    -- And the maths agrees: WeakAt over the decoy's own record is on the target then.
+    local mid = Sonar.WeakAt({ duration = s.decoy.duration, hold = 0,
+                               k = s.decoy.k, dir = s.decoy.dir }, s.decoy.crossAt)
+    truthy(math.abs(mid - 0.5) < 1e-9, 'the decoy must actually be over the target at crossAt')
+end)
+
 test('S19 the float tier reaches the render and changes nothing on the server', function()
     local plain = start({ difficulty = 5, rig = true, stats = { float = 'float_wood' } })
     local smart = start({ difficulty = 5, rig = true, stats = { float = 'float_smart' } })
@@ -641,16 +918,6 @@ test('S19 the float tier reaches the render and changes nothing on the server', 
     equal(plain.last.weakHalf, smart.last.weakHalf, 'but the target is exactly as hard')
     equal(plain.last.perfectHalf, smart.last.perfectHalf)
 end)
-
--- The three score tests below are the only place the grade values (PERFECT 1.0, SAFE 0.7,
--- MISS 0) are pinned, because the act callback returns no score of its own -- it comes out
--- at settlement, through Encounter.PerfScore, which is where it actually matters.
-local function scoreOf(g)
-    local claim = H.CB['zfishing:claim'](5, g.sid, 0, true)
-    truthy(claim.ok, tostring(claim.reason))
-    equal(g.calls.give, 1, 'the catch was committed once')
-    return g.calls.ctx.perfScore
-end
 
 test('S20 a flawless fight scores exactly one', function()
     local g = start({ difficulty = 1 })
@@ -752,6 +1019,16 @@ local MAX_COMPENSATION = 200
 -- rate across three ping bands, which is what can falsify them.
 local MIN_PERFECT_MS = 90
 local MIN_WEAK_MS = 240
+-- How far a decoy's crossing must sit from the real one. Every curve in the easing family
+-- below crosses the target at the midpoint of its own travel, so a decoy sharing the
+-- pass's timing crosses at the SAME millisecond as the fish no matter what k and dir it
+-- is given -- decoration, not a false opportunity. This is the separation that makes it
+-- one. 550ms clears the widest SAFE window in the game (tier-5 HEAVY, +/-384ms).
+local MIN_DECOY_SEPARATION = 550
+-- Seeded wobble on `hold`, as a fraction of duration. Without it every zero-hold profile
+-- crosses at exactly duration/2, so DART, HEAVY and GHOST would all present their
+-- opportunity on the same clock and a player could learn one and reuse it for three.
+local HOLD_JITTER = 0.06
 
 -- Movement profiles. `k` shapes the speed curve: k > 0 is slow across the target and fast
 -- at the edges, k < 0 the reverse, and the family is monotone across (-0.5, 1) so the
@@ -789,14 +1066,23 @@ function Sonar.TargetSpeed(pass)
     return (1 - pass.k) / (pass.duration - pass.hold)
 end
 
-local function armPass(st, now)
+local function armPass(st, now, ping)
     st.phaseId = st.phaseId + 1
     st.attempt = st.attempt + 1
 
     local p = st.profileDef
     st.dir = rand(st) < 0.5 and 1 or -1
     st.k = p.k
-    st.hold = math.floor(st.duration * p.hold)
+    -- Jittered so the crossing is not the same clock every pass. See HOLD_JITTER.
+    local holdFrac = p.hold + (rand(st) - 0.5) * 2 * HOLD_JITTER
+    st.hold = math.floor(st.duration * ZUtil.clamp(holdFrac, 0, 0.5))
+
+    -- Frozen here, not read at strike time. A player who shapes their connection can push
+    -- the measured ping, and reading it on arrival would let them push it at exactly the
+    -- moment it pays. Sampling it before the pass means they have to hold the degradation
+    -- through the part of the fight they are trying to read, which costs them more than it
+    -- buys. They still cannot choose the value, and it is still capped.
+    st.compensationMs = ZUtil.clamp((ping or 0) * 0.5, 0, MAX_COMPENSATION)
 
     -- The floor, applied per pass rather than per tier, because how tight a band is in
     -- milliseconds depends on the profile as much as on the tier: at tier 5, DART,
@@ -816,7 +1102,28 @@ local function armPass(st, now)
     -- forbids. Reading which of two blips is real is fair; guessing blind is not.
     st.decoy = nil
     if st.canDecoy and p.name == 'GHOST' then
-        st.decoy = { k = (rand(st) - 0.5) * 0.8, dir = rand(st) < 0.5 and 1 or -1 }
+        -- Its own crossing time is the whole point -- k and dir alone would put it over
+        -- the target at the same instant as the fish. hold = 0 with duration = 2*crossAt
+        -- puts the decoy's own midpoint, and therefore the decoy, on the target at
+        -- crossAt. An early one finishes and leaves the lane, which is the "fades and
+        -- returns" the spec asked for, delivered as motion rather than as opacity.
+        local realCross = st.hold + (st.duration - st.hold) * 0.5
+        local lo, hi = 200, st.duration - 200
+        local early, late = realCross - MIN_DECOY_SEPARATION, realCross + MIN_DECOY_SEPARATION
+        local crossAt
+        if early > lo and (late > hi or rand(st) < 0.5) then
+            crossAt = lo + rand(st) * (early - lo)
+        else
+            crossAt = late + rand(st) * math.max(0, hi - late)
+        end
+        crossAt = math.floor(crossAt)
+        st.decoy = {
+            k = (rand(st) - 0.5) * 0.8,
+            dir = rand(st) < 0.5 and 1 or -1,
+            hold = 0,
+            duration = 2 * crossAt,
+            crossAt = crossAt,
+        }
     end
 
     st.passStartAt = now + INTERVAL
@@ -848,7 +1155,7 @@ function M.build(ctx)
     -- picture lies. armPass checks the profile as well, so this alone does not enable it.
     st.canDecoy = tierIndex >= 4
     st.maxAttempts = tier.requiredHits + tier.maxMisses - 1
-    armPass(st, ctx.now or 0)
+    armPass(st, ctx.now or 0, ctx.ping)
 
     -- The longest possible fight is exactly maxAttempts passes: every attempt either
     -- banks a hit or spends a miss, and one of the two counters reaches its limit. There
@@ -880,18 +1187,30 @@ end
 function M.act(enc, action, now, meta)
     local st = enc.state
 
-    -- The server decides when the strike happened. `now` is arrival; the rewind is half a
-    -- round trip, capped. Nothing the client sent contributes to this.
-    local ping = (meta and meta.ping) or 0
-    local strikeAt = now - ZUtil.clamp(ping * 0.5, 0, MAX_COMPENSATION)
+    -- The server decides when the strike happened. `now` is arrival; the rewind was fixed
+    -- when this pass was armed. Nothing the client sent contributes to either.
+    local strikeAt = now - (st.compensationMs or 0)
 
     local grade
     if action == 'advance' then
         grade = 'miss'                          -- the pass ran out with no strike
     else
         local t = strikeAt - st.passStartAt
-        if t < 0 or t > st.duration then
-            grade = 'miss'                      -- struck outside the pass entirely
+        if t < 0 then
+            -- The fish is not on the lane yet: this is the reacquire gap between passes.
+            -- Scoring it would be scoring a strike against something the UI is not
+            -- showing, which is the rule ARCHITECTURE 12.11 exists to state. So it costs
+            -- nothing -- no hit, no miss, no attempt -- and returns no `value`, which is
+            -- what keeps it out of perfScore as well.
+            --
+            -- This is also what makes a stale strike harmless: one aimed at the previous
+            -- pass arrives before this pass opens and is ignored rather than graded
+            -- against a timeline the player never saw.
+            local frame = M.render(enc, now)
+            frame.notReady = true
+            return { render = frame }
+        elseif t > st.duration then
+            grade = 'miss'                      -- struck after the fish had gone
         else
             local d = math.abs(Sonar.WeakAt(st, t) - TARGET)
             if d <= st.perfectHalf then grade = 'perfect'
@@ -920,7 +1239,7 @@ function M.act(enc, action, now, meta)
         return { render = M.render(enc, now), outcome = 'escape', value = value }
     end
 
-    armPass(st, now)
+    armPass(st, now, meta and meta.ping)
     return { render = M.render(enc, now), outcome = nil, value = value }
 end
 
@@ -938,7 +1257,7 @@ after the mindgame entry, and add it to `test:all` in the same position.
 node tests/luarun.mjs tests/encounter_sonar.test.lua
 ```
 
-Expected: twenty-three `ok -` lines then `23 tests passed`.
+Expected: thirty `ok -` lines then `30 tests passed`.
 
 If S3 or S11's off-centre offsets land in the wrong band, do not adjust the assertion —
 the helper derives the offset from the rendered pass, so a disagreement means the module
@@ -950,7 +1269,7 @@ and the test disagree about the timeline. Work out which is wrong first.
 cd tests && npm run test:all
 ```
 
-Expected: 13 suites, 270 tests, exit 0.
+Expected: 13 suites, 278 tests, exit 0.
 
 - [ ] **Step 7: Commit**
 
@@ -1077,7 +1396,7 @@ end)
 node tests/luarun.mjs tests/encounter_sonar.test.lua
 ```
 
-Expected: `25 tests passed`.
+Expected: `32 tests passed`.
 
 Then prove the drift detector actually detects drift, rather than trusting that it would:
 temporarily change `4 * pass.k` to `4.1 * pass.k` in `Sonar.WeakAt`, re-run, confirm S22
@@ -1089,7 +1408,7 @@ fails and names a sample, and revert.
 cd tests && npm run test:all
 ```
 
-Expected: 13 suites, 272 tests, exit 0.
+Expected: 13 suites, 280 tests, exit 0.
 
 ```bash
 git add tests/gen_sonar_fixture.mjs tests/sonar_fixture.lua tests/encounter_sonar.test.lua tests/package.json web/src/engine/__fixtures__/sonarTimeline.json
@@ -1118,19 +1437,25 @@ fails a test instead of crashing at boot:
     dofile('server/encounter_sonar.lua')
 ```
 
-- [ ] **Step 2: Warn that the fight has no picture yet**
+- [ ] **Step 2: Do not merge — confirm the branch stays open**
 
-D1 makes `Encounter.Playable('sonar_strike')` true, so an admin can force an encounter the
-NUI cannot draw. Until D2 ships, say so where they would find out. In
-`server/encounter_sonar.lua`, immediately before `Encounter.Register`:
+D1 makes `Encounter.Playable('sonar_strike')` true, so from this commit an admin setting
+`EncounterMode = forced, ForcedEncounter = sonar_strike` gets a real server-side fight with
+nothing drawn. That state must never exist on `main`.
 
-```lua
--- D2 ships the NUI. Until then this encounter is reachable and unrendered, so an admin
--- forcing it gets a fight they cannot see. Remove this warning in the same commit that
--- adds web/src/encounters/SonarStrike.tsx.
-print('[zfishing] sonar_strike is registered but has no NUI yet (Phase D1) -- '
-    .. 'forcing it will produce an invisible fight')
+There is no code for this step. It exists because the natural next action after a green
+suite is to run `finishing-a-development-branch`, and here that is wrong:
+
+```bash
+git branch --show-current      # must be encounter-sonar
+git log --oneline main..HEAD   # D1's commits, still unmerged
 ```
+
+Leave the branch as-is and write the D2 plan against it. `encounter-sonar` merges to `main`
+once, after D2, with the NUI in the same merge. An earlier draft of this plan merged D1
+alone and printed a console warning instead; a log line does not make an unplayable
+encounter playable, and the warning would have been a permanent artifact of a state that
+lasted two commits.
 
 - [ ] **Step 3: Verify everything**
 
@@ -1138,7 +1463,7 @@ print('[zfishing] sonar_strike is registered but has no NUI yet (Phase D1) -- '
 cd tests && npm run test:all
 ```
 
-Expected: 13 suites, 272 tests, exit 0.
+Expected: 13 suites, 280 tests, exit 0.
 
 ```bash
 cd web && npm test
@@ -1164,20 +1489,40 @@ Add `### 12.12 Sonar Strike (sonar_strike)` to `docs/ARCHITECTURE.md`, covering:
   and submits `atMs = 1840` because 1840 is the perfect centre; the arrival check passes.
   Then the fix: arrival minus a bounded rewind, so delay is the only lever and delay only
   makes strikes worse.
-- `MAX_COMPENSATION = 200` and why it is capped.
+- `MAX_COMPENSATION = 200` and why it is capped, **and that the compensation is fixed when
+  the pass arms rather than read when the strike lands** (D.4a) — with the accurate threat
+  model: a client cannot choose its compensation, but it can influence the measured ping,
+  which is why the value is both capped and sampled early.
 - **The two clocks in one call** (D.6 above), verbatim — the raw clock judges expiry, the
   compensated one judges the grade.
+- **A strike before the pass opens is a no-op, not a miss** (D.4b), and that it returns no
+  `value` so it cannot dilute `perfScore` either. Name the rule it serves: nothing is
+  scored against something the UI is not showing.
+- **The `hold` jitter** (D.3) and what it prevents: without it every zero-hold profile
+  crosses at exactly `duration / 2`, so three profiles would share one clock.
 - `Sonar.WeakAt`, the easing family, and why `k ∈ (−0.5, 1)` is what makes the crossing
   unique.
 - The profile table, and **one crossing per pass** with the three costs a second crossing
   would carry.
 - **GHOST never hides the real fish** — opacity floor 0.35, difficulty carried by the
   decoy — and that this is §12.11's rule applied to a third encounter.
+- **Why the decoy needs its own crossing time**, with the reason stated as a property of
+  the easing family rather than as a preference: every curve crosses at `u = 0.5`, so a
+  decoy sharing the pass's timing is over the target at the same millisecond as the fish
+  for every `k` and every `dir`. Give `MIN_DECOY_SEPARATION = 550` and where 550 comes
+  from.
 - The millisecond derivation of D.4: the error budget table, the before/after tier-5
   windows, and that the floor is per-pass because the shortfall depends on profile as much
-  as tier. Include both tables.
+  as tier. Include both tables, **and the linear-versus-actual table** with the note that
+  the generator uses the linear form and the test measures the curve.
 - `requiredHits` is the tier; SAFE and PERFECT advance identically; PERFECT buys score.
 - The deviation table of D.5, with reasons.
+- **A module may use a subset of the shared outcome vocabulary.** The vocabulary is
+  `success / escape / snap / timeout`; sonar never emits `snap`, because a line pool it
+  cannot manage is a failure axis the player has no lever on. Say so in §12 generally, not
+  only in §12.12 — it is a framework property, not a sonar quirk.
+- **`lineRating` has no effect in sonar**, and that this is fine: encounters read the gear
+  their fight is about. Sonar reads the float.
 - That the fixture pins TS to Lua and does not validate the maths.
 
 Add a change-history entry under `## 13` stating that this is the server half only, that
@@ -1195,9 +1540,11 @@ row needs D2 before it can be run. Leave every box unticked.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add fxmanifest.lua tests/security.test.lua server/encounter_sonar.lua docs/ARCHITECTURE.md docs/testing/zfishing-live-e2e-checklist.md web/src/__tests__/__snapshots__/bundleRebuildPreservation.test.ts.snap
+git add fxmanifest.lua tests/security.test.lua docs/ARCHITECTURE.md docs/testing/zfishing-live-e2e-checklist.md web/src/__tests__/__snapshots__/bundleRebuildPreservation.test.ts.snap
 git commit -m "feat: register sonar strike and document the server half"
 ```
+
+Do **not** run `finishing-a-development-branch` here. D1 ends on an open branch by design.
 
 ---
 
@@ -1210,9 +1557,9 @@ cd web && npm test
 
 Expected state at the end of D1:
 
-- 13 suites, 272 Lua tests; 89 web tests; no type errors.
-- `Encounter.Playable('sonar_strike')` is true, and forcing it prints a warning that there
-  is no NUI.
+- 13 suites, 280 Lua tests; 89 web tests; no type errors.
+- **`encounter-sonar` is not merged.** `Encounter.Playable('sonar_strike')` is true from
+  D1's first commit, so this branch stays open until D2 puts a picture behind it.
 - No fish resolves to any new encounter on its own — DEFAULT is still the legacy fight for
   everyone until Phase F.
 - `tests/sonar_fixture.lua` and `web/src/engine/__fixtures__/sonarTimeline.json` are
@@ -1230,6 +1577,10 @@ Listed so the D2 plan can be written against real code rather than guesses:
 - `floatTier` 1/2/3 and what each is allowed to change — silhouette clarity, and a
   weak-zone indicator band at tier 3 only.
 - The GHOST opacity floor of 0.35, which is a NUI obligation D1 states and D2 implements.
+- The decoy record — `{ k, dir, hold, duration, crossAt }` — which D2 draws with the same
+  `posAt` it draws the fish with, on the decoy's own timeline rather than the pass's.
+- `notReady`, which D2 must render as "not yet" and never as a miss, and which is the
+  reason D2 also has to dim the strike affordance for the whole `INTERVAL` gap.
 
 ## Known limitations to carry into the completion report
 
@@ -1243,3 +1594,15 @@ mapping in spec §7 (swordfish, and optionally shark and golden) is Phase F's wo
 
 **The keycap gap from Phase B still applies** and will apply to sonar's single strike key
 in D2. A device-aware `Keycap` remains a cross-encounter task.
+
+**Actions are bound to a phase by two guards rather than one check.** `advance` is bound by
+the dispatcher's deadline test and a strike by D.4b's not-ready rule (see D.4c). No stale
+action can score against a phase it was not aimed at today, but the invariant is emergent
+rather than stated. Sending `phaseId` with every action and checking it alongside `seq`
+would make it explicit; it changes the wire signature of all three encounters, so it is a
+cross-encounter task next to the keycap one.
+
+**`lineRating` does nothing in a sonar fight.** A player who upgrades their line sees no
+change here. That is deliberate — sonar's gear lever is the float — but it is worth saying
+out loud, because "better line is always better" is a reasonable thing for a player to
+assume and it is not true in this encounter.
