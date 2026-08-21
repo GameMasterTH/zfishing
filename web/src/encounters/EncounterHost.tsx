@@ -34,7 +34,14 @@ function Live<S>({ initial, startedAt, children }: {
 //
 // The `key` is what makes switching encounters safe: both branches render the same
 // component type, so without it React would reconcile them as one and keep the previous
-// encounter's state shape for a frame.
+// encounter's state shape.
+//
+// It closes reconciliation, not delivery -- each Live attaches its own `message` listener
+// and filters on `action` alone, so nothing here would reject another encounter's payload.
+// What makes that unreachable is ordering: the bridge always sends `encounter` before any
+// `encounterState` for that fight, postMessage preserves order, and React's unmount and
+// mount land in one synchronous commit that no event can interleave with. If any of those
+// three stops holding, this needs a type field on the message and a check here.
 export default function EncounterHost({ msg }: { msg: EncounterMessage }) {
   switch (msg.type) {
     case 'counter_pull':

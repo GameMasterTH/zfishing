@@ -318,8 +318,10 @@ test('M18 fumbled landings are bounded -- they cannot second-wind forever', func
         if res.outcome then break end
     end
     equal(res.outcome, 'escape', 'the escape risk a fumble costs is what ends the loop')
-    truthy(fumbles <= threshold,
-        ('a fumble budget of %d must not stretch to %d'):format(threshold, fumbles))
+    -- Both edges, not just the upper one: `<=` would also pass if a single fumble ended
+    -- the fight, which is a different bug wearing the same assertion.
+    equal(fumbles, threshold,
+        ('a fumble costs exactly one escape risk, so %d of them end it'):format(threshold))
 end)
 
 test('M19 an imperfect winning fight scores between zero and one', function()

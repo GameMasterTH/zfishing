@@ -884,11 +884,22 @@ Append to `tests/client_encounter.test.lua`, before `H.run()`:
 ```lua
 -- ---------------------------------------------------------------- per-encounter keys
 
--- Presses a control and returns the action the bridge sent for it, or nil.
+-- Runs one pass of the bridge's input-polling thread and returns the action it sent for
+-- `control`, or nil. The poll loop is `while ENC.active and ZClient.active`, and the
+-- harness's Wait() is a no-op, so it is stopped after a single pass by dropping the one
+-- half of that condition a test can reach. The thread under test is always the last one
+-- created -- the bite handler starts it as its final act.
+--
+-- Do not iterate all of H.THREADS instead: whichever thread runs first would drop
+-- ZClient.active before the poll thread was reached, and running the poll thread with a
+-- no-op Wait and no exit condition hangs the suite outright.
 local function pressAndRead(control)
     local before = #sent
     _G.__PRESS(control)
-    for _, thread in ipairs(H.THREADS) do thread() end
+    local realWait = _G.Wait
+    _G.Wait = function() _G.ZClient.active = false end
+    H.THREADS[#H.THREADS]()
+    _G.Wait, _G.ZClient.active = realWait, true
     for i = before + 1, #sent do
         if sent[i].name == 'zfishing:encounter:act' then return sent[i].args[4] end
     end
@@ -1591,10 +1602,33 @@ git commit -m "test: cover the fish mindgame UI, and uncross counter-pull's bars
 - Rebuild and commit: `web/dist`
 - Modify: `docs/ARCHITECTURE.md`, `docs/testing/zfishing-live-e2e-checklist.md`
 
-- [ ] **Step 1: Load the module**
+- [ ] **Step 1: Load the module, and pin the order it loads in**
 
 In `fxmanifest.lua`, add `'server/encounter_mindgame.lua',` to `server_scripts` immediately
 after `'server/encounter_counter_pull.lua',`.
+
+That position is load-bearing and nothing currently guards it: each encounter module calls
+`Encounter.Register` in its body, so listing one before `server/encounter.lua` is a
+boot-time crash in FiveM — and no encounter suite would catch it, because they all `dofile`
+their module directly instead of walking the manifest. Close that by adding both modules to
+`loadAllServerModulesAtBoot` in `tests/security.test.lua`, in manifest order, right after
+`dofile('server/encounter.lua')`:
+
+```lua
+    -- In fxmanifest order, and that order is the point: each module's body calls
+    -- Encounter.Register at load, so listing one before server/encounter.lua is a
+    -- boot-time crash in FiveM that no per-encounter suite would catch -- they dofile
+    -- their module directly and never walk the manifest.
+    dofile('server/encounter_counter_pull.lua')
+    dofile('server/encounter_mindgame.lua')
+```
+
+```bash
+node tests/luarun.mjs tests/security.test.lua
+```
+
+Expected: still `133 tests passed` — the modules only register at load, so G1's "no DB, no
+host mutation at boot" assertions are unaffected.
 
 - [ ] **Step 2: Rebuild the bundle**
 
