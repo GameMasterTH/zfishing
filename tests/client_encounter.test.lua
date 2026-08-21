@@ -197,4 +197,48 @@ test('B10 a hook the server refuses ends the session cleanly', function()
     truthy(#ended > 0, 'the player is told the fish got away')
 end)
 
+-- ---------------------------------------------------------------- per-encounter keys
+
+-- Runs one pass of the bridge's input-polling thread and returns the action it sent for
+-- `control`, or nil. The poll loop is `while ENC.active and ZClient.active`, and the
+-- harness's Wait() is a no-op, so it is stopped after a single pass by dropping the one
+-- half of that condition a test can reach. The thread under test is always the last one
+-- created -- the bite handler starts it as its final act.
+local function pressAndRead(control)
+    local before = #sent
+    _G.__PRESS(control)
+    local realWait = _G.Wait
+    _G.Wait = function() _G.ZClient.active = false end
+    H.THREADS[#H.THREADS]()
+    _G.Wait, _G.ZClient.active = realWait, true
+    for i = before + 1, #sent do
+        if sent[i].name == 'zfishing:encounter:act' then return sent[i].args[4] end
+    end
+    return nil
+end
+
+test('B11 counter-pull maps the four controls to its own action names', function()
+    loadBridge(happyServer())
+    biteAndHook('counter_pull')
+    equal(pressAndRead(34), 'left')
+    equal(pressAndRead(35), 'right')
+    equal(pressAndRead(33), 'brace')
+    equal(pressAndRead(22), 'reel')
+end)
+
+test('B12 the mindgame maps the same controls to its own action names', function()
+    loadBridge(happyServer())
+    biteAndHook('fish_mindgame')
+    equal(pressAndRead(34), 'give_line')
+    equal(pressAndRead(33), 'brace')
+    equal(pressAndRead(35), 'hold')
+    equal(pressAndRead(22), 'reel')
+end)
+
+test('B13 an encounter with no key map polls nothing rather than sending nonsense', function()
+    loadBridge(happyServer())
+    biteAndHook('sonar_strike')
+    equal(pressAndRead(34), nil, 'an unmapped encounter must send no action at all')
+end)
+
 H.run()

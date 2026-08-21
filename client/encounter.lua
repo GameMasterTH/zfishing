@@ -10,13 +10,27 @@
 local ENC = { active = false, seq = 0, inFlight = false,
               challengeId = nil, sessionId = nil, type = nil }
 
--- action -> control. All four are analog on a gamepad already, so controller support
--- needs no separate mapping and no button mashing.
-local KEYS = {
-    { action = 'left',  control = 34 },   -- INPUT_MOVE_LEFT_ONLY   (A / stick left)
-    { action = 'right', control = 35 },   -- INPUT_MOVE_RIGHT_ONLY  (D / stick right)
-    { action = 'brace', control = 33 },   -- INPUT_MOVE_DOWN_ONLY   (S / stick down)
-    { action = 'reel',  control = 22 },   -- the key the legacy fight already uses
+-- control -> action, per encounter. The four controls are the same everywhere because all
+-- four are analog on a gamepad already, so controller support needs no separate mapping
+-- and no button mashing; only the action names differ.
+--
+-- The mindgame's four responses are not directional, so their meaning is carried by the
+-- on-screen label beside each keycap rather than by the key's position. That is affordable
+-- there and not in counter-pull, because a mindgame turn is a considered choice with
+-- seconds to read, not a reflex.
+local KEYMAPS = {
+    counter_pull = {
+        { action = 'left',  control = 34 },   -- INPUT_MOVE_LEFT_ONLY   (A / stick left)
+        { action = 'right', control = 35 },   -- INPUT_MOVE_RIGHT_ONLY  (D / stick right)
+        { action = 'brace', control = 33 },   -- INPUT_MOVE_DOWN_ONLY   (S / stick down)
+        { action = 'reel',  control = 22 },   -- the key the legacy fight already uses
+    },
+    fish_mindgame = {
+        { action = 'give_line', control = 34 },
+        { action = 'brace',     control = 33 },
+        { action = 'hold',      control = 35 },
+        { action = 'reel',      control = 22 },
+    },
 }
 
 local function reset()
@@ -126,9 +140,12 @@ RegisterNetEvent('zfishing:bite', function(data)
     -- rate because that is how FiveM reads a key, but it only talks to the server on an
     -- edge, and only when no request is already out.
     CreateThread(function()
+        -- An encounter with no map polls nothing: sending another encounter's action names
+        -- would only earn a bad_action per keypress.
+        local keys = KEYMAPS[ENC.type]
         while ENC.active and ZClient.active do
-            if not ENC.inFlight then
-                for _, k in ipairs(KEYS) do
+            if keys and not ENC.inFlight then
+                for _, k in ipairs(keys) do
                     if IsDisabledControlJustPressed(0, k.control) then
                         send(k.action)
                         break
