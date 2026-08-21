@@ -921,6 +921,12 @@ local function loadAllServerModulesAtBoot()
     dofile('server/store.lua')
     dofile('server/generator.lua')
     dofile('server/encounter.lua')
+    -- In fxmanifest order, and that order is the point: each module's body calls
+    -- Encounter.Register at load, so listing one before server/encounter.lua is a
+    -- boot-time crash in FiveM that no per-encounter suite would catch -- they dofile
+    -- their module directly and never walk the manifest.
+    dofile('server/encounter_counter_pull.lua')
+    dofile('server/encounter_mindgame.lua')
     dofile('server/progression.lua')
     dofile('server/rewards.lua')
     dofile('shared/rig_rules.lua')

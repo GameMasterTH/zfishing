@@ -14,8 +14,9 @@
     "test:encounter-action": "node luarun.mjs tests/encounter_action.test.lua",
     "test:encounter-claim": "node luarun.mjs tests/encounter_claim.test.lua",
     "test:encounter-counter-pull": "node luarun.mjs tests/encounter_counter_pull.test.lua",
+    "test:encounter-mindgame": "node luarun.mjs tests/encounter_mindgame.test.lua",
     "test:client-encounter": "node luarun.mjs tests/client_encounter.test.lua",
-    "test:all": "npm run test:water && npm run test:water-preservation && npm run test:security && npm run test:encounter-resolver && npm run test:encounter-admin && npm run test:encounter-difficulty && npm run test:encounter-session && npm run test:encounter-action && npm run test:encounter-claim && npm run test:encounter-counter-pull && npm run test:client-encounter"
+    "test:all": "npm run test:water && npm run test:water-preservation && npm run test:security && npm run test:encounter-resolver && npm run test:encounter-admin && npm run test:encounter-difficulty && npm run test:encounter-session && npm run test:encounter-action && npm run test:encounter-claim && npm run test:encounter-counter-pull && npm run test:encounter-mindgame && npm run test:client-encounter"
   },
   "devDependencies": {
     "wasmoon": "^1.16.0"

@@ -237,6 +237,61 @@ Same rule as section K: record the measured numbers, do not invent a target firs
 | L-P3 | Four counter-pull fights in progress | | | |
 | L-P4 | `profiler record 200` during one fight | | | attach the breakdown |
 
+## M. Encounter system — Fish Mindgame (Phase C)
+
+Nothing in this section has been executed. Every row is unticked because nobody has
+run it, not because it passed silently.
+
+Same admin gate as section L: no fish carries an `encounter` yet, so set
+`EncounterMode = forced` and `ForcedEncounter = fish_mindgame`. Tier comes from
+rarity and weight — a common fish for tier 1, a legendary for tier 5. Behaviour comes
+from the species' `behavior` field in `config/fish.lua`; check which fish carries
+which before starting, because half these rows depend on it.
+
+| # | Steps | Expected | Pass/Fail | Notes |
+|---|---|---|---|---|
+| M1 | FORCED fish_mindgame, catch a common fish | The mindgame panel opens on hook, not the tension bar and not counter-pull | | |
+| M2 | Watch the first second of any turn | The four responses are visibly dimmed and the window bar is filling, not draining | | |
+| M3 | Press a response during that dimmed period | It is scored as a miss — the panel must have made that obvious before you pressed | | |
+| M4 | Wait for the responses to brighten, then answer | Accepted; the fish-tiring bar advances one step | | |
+| M5 | Answer correctly at the very start of the open window | Same result as M6 — no bonus, no penalty for speed | | |
+| M6 | Answer correctly at the very end of the open window | Same result as M5 | | |
+| M7 | Answer a `RUN` wrong | Line bar drops; escape risk unchanged | | |
+| M8 | Answer a `DIVE` wrong | Line bar drops visibly further than M7 | | |
+| M9 | Answer a `THRASH` wrong | Escape risk +1; line unchanged | | |
+| M10 | Answer a `JUMP` wrong (erratic fish only) | Escape risk +2 | | |
+| M11 | Answer a `REST` wrong | Escape risk +1; line unchanged | | |
+| M12 | Answer a `REST` correctly with REEL | Line bar goes **up** | | |
+| M13 | Repeat M12 with a better reel fitted | Line goes up by more than in M12 | | |
+| M14 | Fight a `steady_heavy` fish and watch three turns | DIVE, DIVE, REST — in that order, every time | | |
+| M15 | Fight the same species again | The same chain. A learnable fish is the whole point | | |
+| M16 | Tier 5 fight, count correct answers to the landing | Exactly nine | | |
+| M17 | Repeat M16 with the best rod, reel and line in the game | Still exactly nine | | |
+| M18 | Tier 4+ fight, watch for a cue that changes | It flips **while the responses are still dimmed**, never after they brighten | | |
+| M19 | On that faking turn, answer the cue shown after the flip | Correct — you were never shown a lie you could act on | | |
+| M20 | Reach the landing turn | Responses are open immediately; no telegraph | | |
+| M21 | Answer the landing wrong once | Escape risk +1, one read owed again, fight resumes | | |
+| M22 | Keep fumbling the landing | The fish escapes within the risk budget — it does not loop forever | | |
+| M23 | Answer wrong until the line is gone | Outcome `snap`; line bar at zero | | |
+| M24 | Answer wrong until escape risk fills | Outcome `escape`; line bar still intact | | |
+| M25 | Win a fight cleanly, note the XP | Higher than a win with several mistakes; money, weight and quality identical | | |
+| M26 | Walk away mid-fight and do nothing | The turn expires, the fight advances, and the encounter eventually times out | | |
+| M27 | Disconnect mid-fight, reconnect | No stuck session; no reward | | |
+| M28 | Play a whole fight on a controller | All four responses reachable on stick + face button; no mashing needed | | |
+| M29 | Switch `ForcedEncounter` to counter_pull and fish again | Counter-pull panel, its own key meanings, no leakage between the two | | |
+| M30 | In a counter-pull fight, read the line and mistake bars | Two separate rows; each bar's length matches its own caption | | |
+
+### Mindgame performance
+
+Same rule as section K: record the measured numbers, do not invent a target first.
+
+| # | Scenario | resmon ms (client) | resmon ms (server) | Notes |
+|---|---|---|---|---|
+| M-P1 | One mindgame fight in progress | | | |
+| M-P2 | Four mindgame fights in progress | | | |
+| M-P3 | Two mindgame and two counter-pull fights at once | | | |
+| M-P4 | `profiler record 200` during one mindgame fight | | | attach the breakdown |
+
 ## Sign-off
 
 Every row Pass (or an explicit, justified N/A): `______`  ·  Date: `__________`

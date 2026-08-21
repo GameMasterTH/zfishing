@@ -32,6 +32,7 @@ server_scripts {
     'server/generator.lua',
     'server/encounter.lua',
     'server/encounter_counter_pull.lua',
+    'server/encounter_mindgame.lua',
     'server/rewards.lua',
     'server/admin.lua',
     'server/rig.lua',

@@ -105,9 +105,20 @@ export default function CounterPull(
 
       <div className="bar-row">
         <div className="bar-label">{t('enc_line')}</div>
-        <div className="bar-caption">{state.misses}/{state.maxMisses}</div>
+        <div className="bar-caption cp-line">{state.linePct}%</div>
       </div>
       <div className="bar-track"><div className="bar-fill enc-line-fill" style={{ width: `${state.linePct}%` }} /></div>
+
+      <div className="bar-row">
+        <div className="bar-label">{t('enc_cp_misses')}</div>
+        <div className="bar-caption cp-misses">{state.misses}/{state.maxMisses}</div>
+      </div>
+      <div className="bar-track">
+        <div
+          className="bar-fill enc-risk-fill"
+          style={{ width: `${Math.min(100, (state.misses / Math.max(1, state.maxMisses)) * 100)}%` }}
+        />
+      </div>
 
       {outcome && <div className="enc-outcome">{t(`enc_outcome_${outcome}`)}</div>}
     </div>
