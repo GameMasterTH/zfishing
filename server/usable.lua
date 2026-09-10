@@ -13,6 +13,7 @@
 -- framework with a local callback — robust and immediate.
 
 local function onRodUsed(source, item)
+    if not RequireEntitlement('zfishing') then return end
     TriggerClientEvent('zfishing:client:useRod', source, item)
 end
 
@@ -42,6 +43,10 @@ local function directRegister(rodName)
 end
 
 CreateThread(function()
+    if not RequireEntitlement('zfishing') then
+        print('[zfishing] usable rod registration skipped: entitlement unavailable')
+        return
+    end
     -- one diagnostic attempt through the bridge so its real result is visible
     local sample
     for rodName in pairs(Config.Equipment.rods) do sample = rodName break end

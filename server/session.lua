@@ -124,6 +124,7 @@ local function resolveZone(src)
 end
 
 lib.callback.register('zfishing:cast', function(src, power, rodSlot)
+    if not RequireEntitlement('zfishing') then return { ok = false, reason = 'unavailable' } end
     if not gate.allow(src, 'cast') then return { ok = false, reason = 'too_many_requests' } end
     if Zfishing.Blocked() then return { ok = false, reason = 'unavailable' } end
     if sessions[src] then return { ok = false, reason = 'busy' } end
@@ -259,6 +260,7 @@ lib.callback.register('zfishing:cast', function(src, power, rodSlot)
 end)
 
 lib.callback.register('zfishing:hook', function(src, sessionId)
+    if not RequireEntitlement('zfishing') then return { ok = false, reason = 'unavailable' } end
     if not gate.allow(src, 'hook') then return { ok = false, reason = 'too_many_requests' } end
     local s = sessionFor(src, sessionId)
     if not s then return { ok = false, reason = 'invalid_session' } end
@@ -283,6 +285,7 @@ lib.callback.register('zfishing:hook', function(src, sessionId)
 end)
 
 lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs, success, reason)
+    if not RequireEntitlement('zfishing') then return { ok = false, reason = 'unavailable' } end
     if not gate.allow(src, 'claim') then return { ok = false, reason = 'too_many_requests' } end
     local s = sessionFor(src, sessionId)
     if not s then return { ok = false, reason = 'invalid_session' } end
@@ -409,6 +412,7 @@ lib.callback.register('zfishing:claim', function(src, sessionId, reelDurationMs,
 end)
 
 lib.callback.register('zfishing:cancel', function(src, sessionId)
+    if not RequireEntitlement('zfishing') then return { ok = false, reason = 'unavailable' } end
     local s = sessionFor(src, sessionId)
     if not s then return { ok = false, reason = 'invalid_session' } end
     -- Settlement owns the session from 'settling' until the claim callback clears
@@ -423,6 +427,7 @@ end)
 
 RegisterNetEvent('zfishing:server:anchorBoat', function(netId)
     local src = source
+    if not RequireEntitlement('zfishing') then return end
     if not gate.allow(src, 'anchor') then return end
     BoatAnchor.Add(src, netId)
 end)
@@ -434,6 +439,7 @@ end)
 -- a reference to that boat.
 RegisterNetEvent('zfishing:server:unanchorBoat', function(netId)
     local src = source
+    if not RequireEntitlement('zfishing') then return end
     BoatAnchor.Remove(src, netId)
 end)
 

@@ -376,6 +376,7 @@ local function runSale(src, sale)
 end
 
 lib.callback.register('zfishing:sellAll', function(src)
+    if not RequireEntitlement('zfishing') then return { ok = false, total = 0, reason = 'unavailable' } end
     if not gate.allow(src, 'sell') then return { ok = false, total = 0, reason = 'too_many_requests' } end
     if Zfishing.Blocked() then
         Zfishing.Notify(src, 'Fishing is unavailable right now', 'error')

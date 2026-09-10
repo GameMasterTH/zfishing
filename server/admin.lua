@@ -1,7 +1,7 @@
 -- สิทธิ์ผู้ดูแลมาจาก zcore_lib แบบกลาง: console, framework admin,
 -- ACE มาตรฐาน หรือ zfishing.admin ที่เป็น override แบบ optional
 function isAdmin(src)
-    return exports.zcore_lib:IsAdmin(src, 'zfishing.admin')
+    return RequireEntitlement('zfishing') and exports.zcore_lib:IsAdmin(src, 'zfishing.admin')
 end
 
 lib.callback.register('zfishing:admin:check', function(src)

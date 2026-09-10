@@ -61,6 +61,7 @@ local function installHost()
         nil, nil, nil, nil, nil, nil, nil, nil, nil
 
     _G.lib = { callback = { register = function(name, fn) CB[name] = fn end } }
+    _G.RequireEntitlement = function() return true end
     _G.RegisterCommand = function(name, fn) CMD[name] = fn end
     _G.RegisterNetEvent = function(name, fn) NETEVENTS[name] = fn end
     _G.AddEventHandler = function(name, fn) EVENTS[name] = fn end

@@ -53,6 +53,7 @@ function H.installHost()
         nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
 
     _G.lib = { callback = { register = function(name, fn) H.CB[name] = fn end } }
+    _G.RequireEntitlement = function() return true end
     _G.RegisterCommand = function(name, fn) H.CMD[name] = fn end
     _G.RegisterNetEvent = function(name, fn) H.NETEVENTS[name] = fn end
     _G.AddEventHandler = function(name, fn) H.EVENTS[name] = fn end

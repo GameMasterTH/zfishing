@@ -22,6 +22,7 @@ end
 local function seededMark(domain) return '_seeded_' .. domain end
 
 function Store.Seed()
+    if not RequireEntitlement('zfishing') then return false end
     if getSetting(seededMark('settings')) == nil then
         putSetting('RateLimit', Config.RateLimit)
         putSetting('Timings', Config.Timings)
@@ -62,6 +63,7 @@ function Store.Seed()
 end
 
 function Store.Load()
+    if not RequireEntitlement('zfishing') then return false end
     for _, key in ipairs(SETTING_KEYS) do
         local v = getSetting(key)
         if v ~= nil then Config[key] = v end
@@ -153,6 +155,7 @@ end)
 AddEventHandler('playerDropped', function() syncGate.forget(source) end)
 
 RegisterCommand('zfishreload', function(src)
+    if not RequireEntitlement('zfishing') then return end
     if not exports.zcore_lib:IsAdmin(src, 'zfishing.admin') then return end
     Store.Load()
     Store.Broadcast()
@@ -162,6 +165,7 @@ end, false)
 
 -- ---------------------------------------------------------------- mutations
 function Store.SaveSetting(key, value)
+    if not RequireEntitlement('zfishing') then return false, 'unavailable' end
     local clean, err = Validate.Setting(key, value)
     if err then return false, err end
     Config[key] = clean
@@ -171,6 +175,7 @@ function Store.SaveSetting(key, value)
 end
 
 function Store.UpsertZone(z)
+    if not RequireEntitlement('zfishing') then return nil, 'unavailable' end
     local c, err = Validate.Zone(z)
     if err then return nil, err end
     if c.id then
@@ -186,6 +191,7 @@ function Store.UpsertZone(z)
 end
 
 function Store.DeleteZone(id)
+    if not RequireEntitlement('zfishing') then return false end
     id = tonumber(id); if not id then return false end
     MySQL.prepare.await('DELETE FROM zfishing_zones WHERE id = ?', { id })
     Store.Load()
@@ -194,6 +200,7 @@ function Store.DeleteZone(id)
 end
 
 function Store.SaveFish(species, data)
+    if not RequireEntitlement('zfishing') then return false, 'unavailable' end
     if type(species) ~= 'string' or species == '' then return false, 'species key required' end
     local c, err = Validate.Fish(data); if err then return false, err end
     MySQL.prepare.await('INSERT INTO zfishing_fish (species, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)',
@@ -203,12 +210,14 @@ function Store.SaveFish(species, data)
 end
 
 function Store.DeleteFish(species)
+    if not RequireEntitlement('zfishing') then return false end
     MySQL.prepare.await('DELETE FROM zfishing_fish WHERE species = ?', { species })
     Config.Fish[species] = nil
     return true
 end
 
 function Store.SaveEquipment(slot, item, data)
+    if not RequireEntitlement('zfishing') then return false, 'unavailable' end
     if type(item) ~= 'string' or item == '' then return false, 'item key required' end
     local c, err = Validate.Equipment(slot, data); if err then return false, err end
     MySQL.prepare.await('INSERT INTO zfishing_equipment (slot, item, data) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)',
@@ -220,6 +229,7 @@ end
 
 -- domain: 'settings' | 'zones' | 'fish' | 'equipment' — wipe DB rows + reseed from static Config
 function Store.ResetDomain(domain)
+    if not RequireEntitlement('zfishing') then return false, 'unavailable' end
     local tables = { settings = 'zfishing_settings', zones = 'zfishing_zones', fish = 'zfishing_fish', equipment = 'zfishing_equipment' }
     if not tables[domain] then return false, 'unknown domain' end
     if domain == 'settings' then
@@ -238,6 +248,10 @@ end
 
 CreateThread(function()
     while GetResourceState('oxmysql') ~= 'started' do Wait(100) end
+    if not RequireEntitlement('zfishing') then
+        print('[zfishing] store startup skipped: entitlement unavailable')
+        return
+    end
     -- Schema is provisioned declaratively by the Site Agent (migrations/mysql)
     -- BEFORE this resource starts. The resource must never create/alter schema
     -- at boot (Site Agent-only DB mutation boundary). Seed()/Load() only read

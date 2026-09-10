@@ -24,6 +24,8 @@ shared_scripts {
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
     'server/lib.lua',
+    -- Required by all entitlement-protected mutation entrypoints below.
+    'server/entitlement_gate.lua',
     'server/store.lua',
     'server/config_schema.lua',
     'server/validate.lua',
